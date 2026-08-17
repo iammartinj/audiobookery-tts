@@ -1,0 +1,45 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- Models and caches (several GB, everyone downloads their own) ---
+model_cache/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+
+# --- Reference voice recordings -------------------------------------------
+# Never commit these. A reference clip is a real person's voice and is very
+# often cut from a commercial recording. Publishing one distributes both the
+# copyrighted audio and that person's voiceprint.
+hlasy/
+voices/
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.m4b
+*.ogg
+
+# --- Generated output ---
+vystup/
+output/
+temp/
+*.png
+!docs/*.png
+
+# --- Local settings (contains absolute paths from your machine) ---
+config.json
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store

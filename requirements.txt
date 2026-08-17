@@ -1,0 +1,27 @@
+# Základní závislosti aplikace.
+# POZOR: torch se instaluje zvlášť (CUDA build) - viz spustit.bat / README.md
+
+# Verze 0.1.7+ je nutna: starsi vydani zavisi na balicku 'pkuseg',
+# ktery se na Windows musi kompilovat ze zdroje a instalace na nem spadne.
+chatterbox-tts>=0.1.7
+
+# Extrakce textu z e-knih
+ebooklib>=0.18
+beautifulsoup4>=4.12
+lxml>=5.0
+chardet>=5.2
+
+# Práce s modely a zvukem
+# (numpy, safetensors a torch si v presnych verzich resi chatterbox-tts sam)
+huggingface_hub>=0.25
+
+# Watermarker 'perth' uvnitr chatterboxu importuje pkg_resources.
+# Ve venv vytvorenem pres uv setuptools chybi vubec a setuptools 81+
+# uz pkg_resources neobsahuje - bez tohoto pinu se model nenacte.
+setuptools>=70,<81
+
+# Prehravani behem prevodu (PortAudio)
+sounddevice>=0.5
+
+# Generovani obalky audioknihy
+Pillow>=10

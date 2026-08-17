@@ -1,0 +1,70 @@
+{
+  "_comment": [
+    "Katalog jazyku syntezy. Uzivatel ho muze rozsirit - aplikace ho jen cte.",
+    "",
+    "zdroj = 'zakladni': jazyk, na kterem byl zakladni multilingvalni model",
+    "  trenovan (23 jazyku). Nic se nestahuje, funguje hned.",
+    "zdroj = 'finetune': jazyk vyzaduje komunitni checkpoint, ktery prepise",
+    "  vahy modulu T3. Stahne se pri prvnim pouziti do model_cache/.",
+    "",
+    "overeno = true znamena, ze checkpoint ma presne stejnou velikost jako",
+    "  t3_mtl23ls_v2.safetensors (2 143 989 752 B), tedy je to fine-tune",
+    "  tehoz modulu a vahy sednou klic po klici. false = velikost se lisi,",
+    "  aplikace to zkusi nacist a do logu napise, kolik klicu nesedlo.",
+    "",
+    "token = ma tokenizer prislusny jazykovy token [kod]? Bez nej model",
+    "  jazyk neumi oznacit a vysledek byva horsi."
+  ],
+
+  "vychozi": "en",
+
+  "jazyky": [
+    {"kod": "en", "nazev": "English",            "zdroj": "zakladni", "token": true},
+    {"kod": "es", "nazev": "Español",            "zdroj": "zakladni", "token": true},
+    {"kod": "de", "nazev": "Deutsch",            "zdroj": "zakladni", "token": true},
+    {"kod": "fr", "nazev": "Français",           "zdroj": "zakladni", "token": true},
+    {"kod": "it", "nazev": "Italiano",           "zdroj": "zakladni", "token": true},
+    {"kod": "pt", "nazev": "Português",          "zdroj": "zakladni", "token": true},
+    {"kod": "nl", "nazev": "Nederlands",         "zdroj": "zakladni", "token": true},
+    {"kod": "pl", "nazev": "Polski",             "zdroj": "zakladni", "token": true},
+    {"kod": "ru", "nazev": "Русский",            "zdroj": "zakladni", "token": true},
+    {"kod": "sv", "nazev": "Svenska",            "zdroj": "zakladni", "token": true},
+    {"kod": "da", "nazev": "Dansk",              "zdroj": "zakladni", "token": true},
+    {"kod": "no", "nazev": "Norsk",              "zdroj": "zakladni", "token": true},
+    {"kod": "fi", "nazev": "Suomi",              "zdroj": "zakladni", "token": true},
+    {"kod": "el", "nazev": "Ελληνικά",           "zdroj": "zakladni", "token": true},
+    {"kod": "tr", "nazev": "Türkçe",             "zdroj": "zakladni", "token": true},
+    {"kod": "he", "nazev": "עברית",              "zdroj": "zakladni", "token": true},
+    {"kod": "ar", "nazev": "العربية",             "zdroj": "zakladni", "token": true},
+    {"kod": "hi", "nazev": "हिन्दी",               "zdroj": "zakladni", "token": true},
+    {"kod": "ja", "nazev": "日本語",              "zdroj": "zakladni", "token": true},
+    {"kod": "ko", "nazev": "한국어",              "zdroj": "zakladni", "token": true},
+    {"kod": "zh", "nazev": "中文",                "zdroj": "zakladni", "token": true},
+    {"kod": "ms", "nazev": "Bahasa Melayu",      "zdroj": "zakladni", "token": true},
+    {"kod": "sw", "nazev": "Kiswahili",          "zdroj": "zakladni", "token": true},
+
+    {"kod": "cs", "nazev": "Čeština", "zdroj": "finetune", "token": true,
+     "repo": "Thomcles/Chatterbox-TTS-Czech", "gated": true, "overeno": true,
+     "velikost_gb": 2.1},
+
+    {"kod": "sk", "nazev": "Slovenčina", "zdroj": "finetune", "token": true,
+     "repo": "pekiskol/chatterbox-tts-slovak", "gated": false, "overeno": true,
+     "velikost_gb": 2.1},
+
+    {"kod": "pt", "nazev": "Português (Brasil)", "zdroj": "finetune", "token": true,
+     "repo": "ResembleAI/Chatterbox-Multilingual-pt-br", "gated": false, "overeno": false,
+     "velikost_gb": 2.1, "poznamka": "oficialni od Resemble AI"},
+
+    {"kod": "fr", "nazev": "Français (fine-tune)", "zdroj": "finetune", "token": true,
+     "repo": "Thomcles/Chatterbox-TTS-French", "gated": false, "overeno": false,
+     "velikost_gb": 2.1},
+
+    {"kod": "fa", "nazev": "فارسی", "zdroj": "finetune", "token": false,
+     "repo": "Thomcles/Chatterbox-TTS-Persian-Farsi", "gated": true, "overeno": true,
+     "velikost_gb": 2.1},
+
+    {"kod": "et", "nazev": "Eesti", "zdroj": "finetune", "token": false,
+     "repo": "Mamsu/chatterbox-tts-et-lobiseja", "gated": false, "overeno": true,
+     "velikost_gb": 2.1}
+  ]
+}

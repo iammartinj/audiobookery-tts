@@ -1,0 +1,17 @@
+# Windows batch files must keep CRLF endings. cmd.exe does not parse a .bat
+# with bare LF correctly - multi-line blocks fall apart and the script exits
+# without a word. Force CRLF on checkout regardless of the user's core.autocrlf.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Everything else is normalised to LF in the repository
+*.py   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.txt  text eol=lf
+
+# Binary - never touch
+*.ttf  binary
+*.png  binary
+*.wav  binary
+*.mp3  binary
