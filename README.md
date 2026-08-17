@@ -181,7 +181,8 @@ The authors of this tool are not responsible for what you make with it.
 | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | OFL 1.1 | bundled in `fonts/`, see `fonts/OFL.txt` |
 
 No model weights are included in this repository. Everything downloads from
-Hugging Face on first use, under whatever terms that model carries.
+Hugging Face on first use, under whatever terms that model carries. Full
+attribution and per-model links are in [NOTICE.md](NOTICE.md).
 
 ## Project layout
 
