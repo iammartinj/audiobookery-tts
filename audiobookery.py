@@ -55,7 +55,7 @@ APP_NAME = "Audiobookery"
 
 # Znaky, které Windows v názvu souboru nedovolí
 ZAKAZANE_ZNAKY = r'[<>:"/\|?*]'
-VERSION = "1.0"
+VERSION = "1.1.0"
 
 KATALOG_PATH = APP_DIR / "modely.json"
 

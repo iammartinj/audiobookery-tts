@@ -117,6 +117,25 @@ that memory goes to a worker instead.
 Each block's seed is derived from its index, so the result does not depend on
 how many processes are running or which one happened to take the block.
 
+### What it costs you while it runs
+
+Parallel generation works precisely by keeping the GPU busy, and that has a
+price. Measured with two processes on an RTX 2080 Ti:
+
+| | |
+|---|---|
+| GPU utilisation | 98 % (median), 100 % peak |
+| VRAM | 10.2 GB of 11.2 GB — about 1 GB left |
+
+The machine stays perfectly usable for ordinary work — browsing, writing, mail —
+because the processes spend their time waiting on the GPU rather than the CPU.
+Anything that wants the graphics card, though, will not get it: games, video
+editing, other local models. There is no VRAM left for them either.
+
+If you want to keep the card free, set *parallel processes* to **1**. That drops
+the speed to 0.91× realtime but leaves the GPU at around 38 %, which is what the
+application did before this feature existed.
+
 ## Chapters and resuming
 
 **Chapters.** EPUB and FB2 carry their own chapter structure, so Audiobookery
