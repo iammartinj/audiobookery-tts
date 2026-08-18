@@ -52,6 +52,9 @@ os.environ.setdefault("TORCH_HOME", str(CACHE_DIR / "torch"))
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 APP_NAME = "Audiobookery"
+
+# Znaky, které Windows v názvu souboru nedovolí
+ZAKAZANE_ZNAKY = r'[<>:"/\|?*]'
 VERSION = "1.0"
 
 KATALOG_PATH = APP_DIR / "modely.json"
@@ -117,6 +120,8 @@ DEFAULT_CONFIG = {
     "poslouchat": False,
     "naskok_s": 120,
     "obalka": True,
+    # 0 = odvodit od volné paměti karty
+    "pracovniku": 0,
     "jazyk": "en",
 }
 
@@ -321,6 +326,126 @@ def nacti_soubor(cesta: Path) -> str:
     if pripona == ".md":
         return nacti_txt(cesta)
     raise ValueError(f"Nepodporovaný formát souboru: {pripona}")
+
+
+def _nadpis_z_html(html: str) -> str:
+    """Vytáhne první nadpis dokumentu - slouží jako název kapitoly."""
+    from bs4 import BeautifulSoup
+
+    try:
+        polevka = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return ""
+    for uroven in ("h1", "h2", "h3", "title"):
+        uzel = polevka.find(uroven)
+        if uzel is not None:
+            nadpis = " ".join(uzel.get_text(" ", strip=True).split())
+            if nadpis:
+                return nadpis[:120]
+    return ""
+
+
+def nacti_epub_kapitoly(cesta: Path) -> list:
+    """EPUB rozpadlý na kapitoly. Jedna položka spine = jedna kapitola."""
+    import ebooklib
+    from ebooklib import epub
+
+    kniha = epub.read_epub(str(cesta))
+
+    polozky = []
+    try:
+        for idref, _linear in kniha.spine:
+            polozka = kniha.get_item_with_id(idref)
+            if polozka is not None and polozka.get_type() == ebooklib.ITEM_DOCUMENT:
+                polozky.append(polozka)
+    except Exception:
+        polozky = []
+    if not polozky:
+        polozky = list(kniha.get_items_of_type(ebooklib.ITEM_DOCUMENT))
+
+    kapitoly = []
+    for polozka in polozky:
+        try:
+            html = polozka.get_content().decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        text = _html_na_text(html).strip()
+        # Obálky, tiráže a obsah bývají skoro prázdné - ty přeskočíme
+        if len(text) < 200:
+            continue
+        kapitoly.append({"nazev": _nadpis_z_html(html), "text": text})
+    return kapitoly
+
+
+def nacti_fb2_kapitoly(cesta: Path) -> list:
+    """FB2 rozpadlý na kapitoly podle sekcí nejvyšší úrovně."""
+    from bs4 import BeautifulSoup
+
+    kodovani = detekuj_kodovani(cesta)
+    obsah = cesta.read_text(encoding=kodovani, errors="replace")
+    try:
+        polevka = BeautifulSoup(obsah, "lxml-xml")
+    except Exception:
+        polevka = BeautifulSoup(obsah, "html.parser")
+
+    for tag in polevka.find_all("binary"):
+        tag.decompose()
+
+    def text_uzlu(uzel) -> str:
+        radky = []
+        for u in uzel.find_all(["title", "subtitle", "p", "v", "text-author"]):
+            if u.name != "title" and u.find_parent(["title", "subtitle"]) is not None:
+                continue
+            radek = u.get_text(" ", strip=True)
+            if radek:
+                radky.append(radek)
+        return "\n".join(radky)
+
+    kapitoly = []
+    for telo in polevka.find_all("body"):
+        if (telo.get("name") or "").lower() in ("notes", "comments", "footnotes"):
+            continue
+        sekce = [s for s in telo.find_all("section", recursive=False)]
+        if not sekce:
+            sekce = telo.find_all("section")
+        if not sekce:
+            text = text_uzlu(telo).strip()
+            if len(text) >= 200:
+                kapitoly.append({"nazev": "", "text": text})
+            continue
+        for s in sekce:
+            text = text_uzlu(s).strip()
+            if len(text) < 200:
+                continue
+            nadpis = ""
+            t = s.find("title")
+            if t is not None:
+                nadpis = " ".join(t.get_text(" ", strip=True).split())[:120]
+            kapitoly.append({"nazev": nadpis, "text": text})
+    return kapitoly
+
+
+def nacti_kapitoly(cesta: Path):
+    """Vrátí (kapitoly, ma_kapitoly).
+
+    Kapitoly umí jen formáty, které je samy nesou - EPUB a FB2. U prostého
+    textu by se musely hádat podle nadpisů, což je nespolehlivé, takže se
+    o to ani nepokoušíme a vrátíme jednu kapitolu s celou knihou.
+    """
+    pripona = cesta.suffix.lower()
+    if pripona == ".epub":
+        kapitoly = nacti_epub_kapitoly(cesta)
+        if len(kapitoly) > 1:
+            return kapitoly, True
+        text = "\n\n".join(k["text"] for k in kapitoly) if kapitoly else nacti_epub(cesta)
+        return [{"nazev": "", "text": text}], False
+    if pripona == ".fb2":
+        kapitoly = nacti_fb2_kapitoly(cesta)
+        if len(kapitoly) > 1:
+            return kapitoly, True
+        text = "\n\n".join(k["text"] for k in kapitoly) if kapitoly else nacti_fb2(cesta)
+        return [{"nazev": "", "text": text}], False
+    return [{"nazev": "", "text": nacti_soubor(cesta)}], False
 
 
 # ==========================================================================
@@ -587,6 +712,133 @@ class WavZapisovac:
     def zavri(self):
         try:
             self.soubor.close()
+        except Exception:
+            pass
+
+
+class WavZapisovacRaw:
+    """WAV zapisovač, který umí i navázat na rozepsaný soubor.
+
+    Modul `wave` otevírá jen pro zápis od nuly a hlavičku dopisuje až při
+    zavření, takže s ním pokračování po přerušení udělat nejde. Kanonická
+    hlavička mono 16bit PCM má pevných 44 bajtů, takže si ji píšeme sami.
+    """
+
+    HLAVICKA = 44
+
+    def __init__(self, cesta: Path, sr: int, pripojit_od_vzorku: int = 0):
+        self.cesta = Path(cesta)
+        self.sr = int(sr)
+        self.pocet_vzorku = 0
+
+        if pripojit_od_vzorku > 0 and self.cesta.exists():
+            # Useknout přesně na zaznamenaný počet vzorků - případný půlblok
+            # z přerušeného běhu se tím zahodí a naváže se čistě.
+            self.soubor = open(self.cesta, "r+b")
+            self.soubor.truncate(self.HLAVICKA + pripojit_od_vzorku * 2)
+            self.soubor.seek(0, os.SEEK_END)
+            self.pocet_vzorku = pripojit_od_vzorku
+        else:
+            self.cesta.parent.mkdir(parents=True, exist_ok=True)
+            self.soubor = open(self.cesta, "wb")
+            self.soubor.write(self._hlavicka(0))
+
+    def _hlavicka(self, pocet_vzorku: int) -> bytes:
+        data = pocet_vzorku * 2
+        return (b"RIFF" + struct.pack("<I", 36 + data) + b"WAVEfmt " +
+                struct.pack("<IHHIIHH", 16, 1, 1, self.sr, self.sr * 2, 2, 16) +
+                b"data" + struct.pack("<I", data))
+
+    def zapis(self, vzorky):
+        import numpy as np
+        data = np.clip(np.asarray(vzorky, dtype="float32").reshape(-1), -1.0, 1.0)
+        pcm = (data * 32767.0).astype("<i2")
+        self.soubor.write(pcm.tobytes())
+        self.pocet_vzorku += len(pcm)
+
+    def zapis_ticho(self, ms: int):
+        if ms <= 0:
+            return
+        pocet = int(self.sr * ms / 1000.0)
+        self.soubor.write(b"\x00\x00" * pocet)
+        self.pocet_vzorku += pocet
+
+    @property
+    def delka_s(self) -> float:
+        return self.pocet_vzorku / float(self.sr) if self.sr else 0.0
+
+    def zavri(self):
+        try:
+            self.soubor.flush()
+            self.soubor.seek(0)
+            self.soubor.write(self._hlavicka(self.pocet_vzorku))
+            self.soubor.close()
+        except Exception:
+            pass
+
+
+def otisk_zadani(cesta_knihy: Path, p: dict, celkem_bloku: int) -> str:
+    """Otisk zdroje a všeho, co ovlivňuje zvuk.
+
+    Když se změní kterákoli položka, navazovat na starý výstup nedává smysl -
+    druhá polovina knihy by zněla jinak než první.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    try:
+        h.update(Path(cesta_knihy).read_bytes())
+    except Exception:
+        h.update(str(cesta_knihy).encode("utf-8"))
+    for klic in ("jazyk_textu", "referencni_wav", "exaggeration", "cfg_weight",
+                 "temperature", "seed", "pauza_ms", "format", "bitrate"):
+        h.update(f"{klic}={p.get(klic)}".encode("utf-8"))
+    h.update(f"bloku={celkem_bloku}".encode("utf-8"))
+    ref = p.get("referencni_wav")
+    if ref and Path(ref).exists():
+        h.update(str(Path(ref).stat().st_mtime_ns).encode("utf-8"))
+    return h.hexdigest()[:32]
+
+
+class Postup:
+    """Stav rozpracovaného převodu vedle výstupu."""
+
+    def __init__(self, cesta: Path):
+        self.cesta = Path(cesta)
+        self.data = {}
+
+    @classmethod
+    def nacti(cls, cesta: Path):
+        p = cls(cesta)
+        try:
+            p.data = json.loads(p.cesta.read_text(encoding="utf-8"))
+        except Exception:
+            p.data = {}
+        return p
+
+    def sedi(self, otisk: str) -> bool:
+        return bool(self.data) and self.data.get("otisk") == otisk and self.data.get("verze") == 1
+
+    @property
+    def hotovo_bloku(self) -> int:
+        return int(self.data.get("hotovo_bloku", 0))
+
+    def uloz(self, otisk: str, hotovo: int, celkem: int, soubory: list,
+             aktualni_wav: str = "", vzorku: int = 0, kapitola: int = 0):
+        self.data = {"verze": 1, "otisk": otisk, "hotovo_bloku": hotovo,
+                     "celkem_bloku": celkem, "hotove_soubory": soubory,
+                     "aktualni_wav": aktualni_wav, "vzorku_v_aktualnim": vzorku,
+                     "kapitola": kapitola}
+        try:
+            docasny = self.cesta.with_suffix(".tmp")
+            docasny.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), encoding="utf-8")
+            docasny.replace(self.cesta)      # atomicky, ať stav nikdy není půlka
+        except Exception:
+            pass
+
+    def smaz(self):
+        try:
+            self.cesta.unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -1204,6 +1456,154 @@ def nastav_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
+def generuj_blok(engine, blok: str, p: dict, index: int, celkem: int, log) -> object:
+    """Vygeneruje blok; hlídá halucinační smyčky a při chybě to zkusí znovu.
+
+    Používají to obě cesty - jednoprocesová i jednotlivý pracovník poolu.
+    """
+    # Hrubý horní odhad délky: české čtení jede kolem 12-16 znaků/s
+    max_delka = len(blok) / 8.0 + 3.0
+
+    for pokus in range(1, 4):
+        try:
+            if pokus > 1:
+                nastav_seed(int(time.time() * 1000) % 999983)
+            vzorky = engine.generuj(blok, p["referencni_wav"], p["exaggeration"],
+                                    p["cfg_weight"], p["temperature"])
+            delka = len(vzorky) / float(engine.sr)
+
+            if delka > max_delka and pokus < 3:
+                log(T("log_dlouhy", index, celkem, delka, len(blok)))
+                continue
+            if delka < 0.05:
+                log(T("log_prazdny", index, celkem))
+                continue
+            return vzorky
+        except Exception as chyba:
+            log(T("log_pokus", index, celkem, pokus, chyba))
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+    log(T("log_preskocen", index, celkem, blok[:60]))
+    return None
+
+
+def volna_vram_gb() -> float:
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return 0.0
+        volno, _celkem = torch.cuda.mem_get_info()
+        return volno / (1024 ** 3)
+    except Exception:
+        return 0.0
+
+
+# Model sám zabírá kolem 3,3 GB, s aktivacemi při generování ~3,7 GB.
+# Počítáme 4,3 GB na pracovníka - radši o jednoho méně než OOM uprostřed
+# osmihodinové knihy.
+VRAM_NA_PRACOVNIKA = 4.3
+
+
+def doporuceny_pocet_pracovniku(strop: int = 4) -> int:
+    """Kolik souběžných procesů se vejde do volné paměti karty."""
+    volno = volna_vram_gb()
+    if volno <= 0:
+        return 1
+    return max(1, min(strop, int(volno // VRAM_NA_PRACOVNIKA)))
+
+
+class Pool:
+    """Rozdělí bloky mezi několik procesů a vrací je zpátky v původním pořadí."""
+
+    def __init__(self, pocet: int, nastaveni: dict, log):
+        import multiprocessing as mp
+        import pracovnik
+
+        self.log = log
+        self._cil = pracovnik.bezet
+        self.kontext = mp.get_context("spawn")
+        self.ukoly = self.kontext.Queue()
+        self.vysledky = self.kontext.Queue()
+        self.procesy = []
+        self.sr = None
+        self.chyba = None
+
+        self._buffer = {}
+        self._dalsi = 1          # index, který se má vydat jako další
+
+        for i in range(pocet):
+            n = dict(nastaveni)
+            n["id"] = i + 1
+            proces = self.kontext.Process(target=self._cil,
+                                          args=(self.ukoly, self.vysledky, n), daemon=True)
+            proces.start()
+            self.procesy.append(proces)
+
+    def pockej_na_start(self, timeout: float = 900.0) -> bool:
+        """Každý pracovník si musí načíst model - běží to souběžně."""
+        hotovo = 0
+        konec = time.time() + timeout
+        while hotovo < len(self.procesy) and time.time() < konec:
+            try:
+                typ, kdo, data = self.vysledky.get(timeout=1.0)
+            except Exception:
+                continue
+            if typ == "pripraven":
+                hotovo += 1
+                self.sr = int(data)
+            elif typ == "log":
+                self.log(data)
+            elif typ == "chyba":
+                self.chyba = data
+                return False
+        return hotovo == len(self.procesy)
+
+    def posli(self, index: int, blok: str, celkem: int, p: dict):
+        self.ukoly.put((index, blok, celkem, p))
+
+    def vezmi(self, timeout: float = 300.0):
+        """Vrátí (index, vzorky) dalšího bloku v pořadí, nebo None při chybě."""
+        konec = time.time() + timeout
+        while time.time() < konec:
+            if self._dalsi in self._buffer:
+                return self._dalsi, self._buffer.pop(self._dalsi)
+            try:
+                typ, kdo, data = self.vysledky.get(timeout=1.0)
+            except Exception:
+                if not any(p.is_alive() for p in self.procesy):
+                    self.chyba = "generující procesy skončily"
+                    return None
+                continue
+            if typ == "audio":
+                self._buffer[kdo] = data      # u audia je 'kdo' index bloku
+            elif typ == "log":
+                self.log(data)
+            elif typ == "chyba":
+                self.chyba = data
+                return None
+        return None
+
+    def potvrd(self):
+        self._dalsi += 1
+
+    def ukonci(self):
+        for _ in self.procesy:
+            try:
+                self.ukoly.put_nowait(None)
+            except Exception:
+                pass
+        for proces in self.procesy:
+            proces.join(timeout=5.0)
+            if proces.is_alive():
+                proces.terminate()
+
+
 # ==========================================================================
 #  GUI
 # ==========================================================================
@@ -1227,7 +1627,9 @@ class Aplikace(tk.Tk):
         self.pause_event = threading.Event()
         self.engine = TtsEngine(self.log_z_vlakna)
 
-        self.bloky = []
+        self.bloky = []          # (index_kapitoly, text_bloku)
+        self.kapitoly = []
+        self.ma_kapitoly = False
         self.nazev_knihy = ""
         self.bezi = False
         self.prehravac = None
@@ -1289,6 +1691,7 @@ class Aplikace(tk.Tk):
             "poslouchat": bool(self.var_poslouchat.get()),
             "naskok_s": int(self.var_naskok.get()),
             "obalka": bool(self.var_obalka.get()),
+            "pracovniku": int(self.var_pracovniku.get()),
             "jazyk": aktualni_jazyk(),
         }
         try:
@@ -1363,6 +1766,7 @@ class Aplikace(tk.Tk):
         self.var_poslouchat = tk.BooleanVar(value=c["poslouchat"])
         self.var_naskok = tk.IntVar(value=c["naskok_s"])
         self.var_obalka = tk.BooleanVar(value=c["obalka"])
+        self.var_pracovniku = tk.IntVar(value=c["pracovniku"])
 
         self.var_stav = tk.StringVar(value=T("stav_pripraveno"))
         self.var_postup = tk.DoubleVar(value=0.0)
@@ -1563,7 +1967,11 @@ class Aplikace(tk.Tk):
         cb.pack(side="left")
         ch2 = ttk.Checkbutton(spodek, text=T("lab_obalka"), variable=self.var_obalka)
         ch2.pack(side="left", padx=(28, 0))
-        self._zamknout(cb, ch2)
+        ttk.Label(spodek, text=T("lab_pracovniku")).pack(side="left", padx=(28, 12))
+        sp_w = ttk.Spinbox(spodek, from_=0, to=4, increment=1,
+                           textvariable=self.var_pracovniku, width=5)
+        sp_w.pack(side="left")
+        self._zamknout(cb, ch2, sp_w)
 
         # ---------------- Ovládání ----------------
         ovladani = ttk.Frame(hlavni)
@@ -2087,27 +2495,42 @@ class Aplikace(tk.Tk):
 
         try:
             self.log(T("log_nacitam_sbor", cesta.name))
-            surovy = nacti_soubor(cesta)
-            text = normalizuj_text(surovy)
-            if not text.strip():
-                raise ValueError("Ze souboru se nepodařilo získat žádný text.")
-
+            kapitoly, ma_kapitoly = nacti_kapitoly(cesta)
             max_znaku = max(50, int(self.var_max_znaku.get()))
-            self.bloky = rozdel_na_bloky(text, max_znaku)
+
+            # Každý blok si nese index kapitoly, ze které pochází - podle toho
+            # se pak výstup rozpadne na soubory.
+            self.kapitoly = []
+            self.bloky = []
+            for i, kap in enumerate(kapitoly):
+                text = normalizuj_text(kap["text"])
+                if not text.strip():
+                    continue
+                bloky = rozdel_na_bloky(text, max_znaku)
+                if not bloky:
+                    continue
+                self.kapitoly.append({"nazev": kap.get("nazev") or "", "prvni_blok": len(self.bloky)})
+                self.bloky.extend((len(self.kapitoly) - 1, b) for b in bloky)
+
             if not self.bloky:
                 raise ValueError("Text se nepodařilo rozdělit na bloky.")
+            self.ma_kapitoly = ma_kapitoly and len(self.kapitoly) > 1
 
             self.nazev_knihy = cesta.stem
-            znaku = sum(len(b) for b in self.bloky)
+            znaku = sum(len(b) for _, b in self.bloky)
             # Zhruba 14 znaků za sekundu mluveného českého textu
             odhad_audio = znaku / 14.0 + len(self.bloky) * (self.var_pauza.get() / 1000.0)
 
             self.var_soubor_info.set(T("info_soubor", cesta.name, f"{znaku:,}".replace(",", " "),
                                        len(self.bloky), formatuj_cas(odhad_audio)))
             self.log(T("log_nacteno", znaku, len(self.bloky), max_znaku))
-            self.log(T("log_ukazka_bloku", self.bloky[0][:120]))
+            if self.ma_kapitoly:
+                self.log(T("log_kapitoly", len(self.kapitoly)))
+            self.log(T("log_ukazka_bloku", self.bloky[0][1][:120]))
         except Exception as chyba:
             self.bloky = []
+            self.kapitoly = []
+            self.ma_kapitoly = False
             self.var_soubor_info.set(T("info_nezdarilo"))
             self.log(T("log_chyba", chyba))
             messagebox.showerror(T("dlg_chyba_nacteni"), str(chyba))
@@ -2176,6 +2599,7 @@ class Aplikace(tk.Tk):
             "poslouchat": bool(self.var_poslouchat.get()),
             "naskok_s": max(5, int(self.var_naskok.get())),
             "obalka": bool(self.var_obalka.get()),
+            "pracovniku": int(self.var_pracovniku.get()),
         }
 
     def spust_prevod(self):
@@ -2188,18 +2612,45 @@ class Aplikace(tk.Tk):
 
         slozka = Path(self.var_vystup_slozka.get().strip('" ') or (APP_DIR / "vystup"))
         nazev = (self.var_vystup_nazev.get().strip() or self.nazev_knihy or "audiokniha")
-        nazev = re.sub(r'[<>:"/\\|?*]', "_", nazev)
+        nazev = re.sub(ZAKAZANE_ZNAKY, "_", nazev)
         slozka.mkdir(parents=True, exist_ok=True)
-
-        wav_cesta = slozka / f"{nazev}.wav"
-        if wav_cesta.exists():
-            if not messagebox.askyesno(T("dlg_existuje"), T("dlg_prepsat", wav_cesta)):
-                return
+        zaklad = slozka / nazev
 
         parametry = self._posbirej_parametry()
         if parametry["format"] == "MP3" and not najdi_ffmpeg():
             messagebox.showwarning(T("dlg_ffmpeg"), T("dlg_ffmpeg_text"))
             parametry["format"] = "WAV"
+        parametry["otisk"] = otisk_zadani(Path(self.var_vstup.get().strip('" ')),
+                                          parametry, len(self.bloky))
+
+        # --- navázat na přerušený běh? ---
+        postup = Postup.nacti(slozka / (nazev + ".progress.json"))
+        od_bloku = 0
+        if postup.sedi(parametry["otisk"]) and 0 < postup.hotovo_bloku < len(self.bloky):
+            odpoved = messagebox.askyesnocancel(
+                T("dlg_navazat"),
+                T("dlg_navazat_text", postup.hotovo_bloku, len(self.bloky),
+                  100.0 * postup.hotovo_bloku / len(self.bloky)))
+            if odpoved is None:
+                return                       # Zrušit
+            if odpoved:
+                od_bloku = postup.hotovo_bloku
+            else:
+                postup.smaz()                # začít znovu od začátku
+                postup = Postup.nacti(postup.cesta)
+        elif postup.data and not postup.sedi(parametry["otisk"]):
+            # Stav existuje, ale kniha nebo parametry se změnily - navazovat nelze
+            self.log(T("log_postup_neplatny"))
+            postup.smaz()
+            postup = Postup.nacti(postup.cesta)
+
+        # Přepsat existující výstup? Ptáme se jen když nenavazujeme.
+        if od_bloku == 0:
+            hotovy = [zaklad.with_suffix(".wav"), zaklad.with_suffix(".mp3")]
+            existujici = [c for c in hotovy if c.exists()]
+            if existujici and not messagebox.askyesno(T("dlg_existuje"),
+                                                      T("dlg_prepsat", existujici[0])):
+                return
 
         self._uloz_config()
 
@@ -2216,12 +2667,12 @@ class Aplikace(tk.Tk):
         self.btn_pauza.config(state="normal", text=T("btn_pauza"))
         self.btn_stop.config(state="normal")
         self._zamkni_ovladani(True)      # formát ani cesty už za běhu neměnit
-        self.var_postup.set(0.0)
+        self.var_postup.set(100.0 * od_bloku / len(self.bloky) if od_bloku else 0.0)
         self.var_poslech_info.set("")
 
         self.vlakno = threading.Thread(
             target=self._worker_prevod,
-            args=(list(self.bloky), wav_cesta, parametry),
+            args=(list(self.bloky), zaklad, parametry, od_bloku, postup),
             daemon=True)
         self.vlakno.start()
 
@@ -2244,26 +2695,56 @@ class Aplikace(tk.Tk):
             self.var_stav.set(T("stav_zastavuji"))
 
     # ------------------------------------------------------------------
-    def _worker_prevod(self, bloky, wav_cesta: Path, p: dict):
+    def _worker_prevod(self, bloky, zaklad: Path, p: dict, od_bloku: int = 0, postup=None):
         zapisovac = None
+        pool = None
         try:
-            self.engine.nacti_model(p["zarizeni"], p["jazyk_textu"])
+            # O souběhu se rozhoduje dřív, než se cokoli načte. Při dávkování
+            # si model drží jen pracovníci - rodič by jím zbytečně blokoval
+            # paměť, kterou by jinak dostal další proces.
+            pocet = int(p.get("pracovniku") or 0) or doporuceny_pocet_pracovniku()
+            if pocet > 1:
+                self.log_z_vlakna(T("log_pool_start", pocet, volna_vram_gb()))
+                pool = Pool(pocet, {"zarizeni": p["zarizeni"], "jazyk_textu": p["jazyk_textu"]},
+                            self.log_z_vlakna)
+                if not pool.pockej_na_start():
+                    self.log_z_vlakna(T("log_pool_selhal", pool.chyba or "?"))
+                    pool.ukonci()
+                    pool = None
+                else:
+                    self.log_z_vlakna(T("log_pool_pripraven", pocet))
+
+            if pool is None:
+                self.log_z_vlakna(T("log_pool_jeden"))
+                self.engine.nacti_model(p["zarizeni"], p["jazyk_textu"])
+                sr = self.engine.sr
+            else:
+                sr = pool.sr
             nastav_seed(p["seed"])
 
             celkem = len(bloky)
-            znaku_celkem = sum(len(b) for b in bloky)
-            znaku_hotovo = 0
+            znaku_celkem = sum(len(b) for _, b in bloky)
+            znaku_pred = sum(len(b) for _, b in bloky[:od_bloku])
+            znaku_hotovo = znaku_pred
             neuspesne = 0
 
-            self.fronta.put(("stav", T("stav_generuji")))
-            self.log_z_vlakna(T("log_start", celkem, wav_cesta))
+            # Rozpad na soubory dává smysl jen tam, kde kapitoly zná sám formát
+            # knihy a kde je z čeho udělat MP3.
+            po_kapitolach = bool(p["format"] == "MP3" and self.ma_kapitoly and najdi_ffmpeg())
+            slozka = (zaklad.parent / zaklad.stem) if po_kapitolach else zaklad.parent
+            slozka.mkdir(parents=True, exist_ok=True)
 
-            zapisovac = WavZapisovac(wav_cesta, self.engine.sr)
+            self.fronta.put(("stav", T("stav_generuji")))
+            if od_bloku:
+                self.log_z_vlakna(T("log_navazuji", od_bloku + 1, celkem))
+            self.log_z_vlakna(T("log_start", celkem, slozka))
+            if po_kapitolach:
+                self.log_z_vlakna(T("log_po_kapitolach", len(self.kapitoly)))
 
             obalka_cesta = None
             if p["obalka"]:
-                kandidat = wav_cesta.with_suffix(".png")
-                if vytvor_obalku(self.nazev_knihy or wav_cesta.stem, kandidat):
+                kandidat = slozka / (zaklad.stem + ".png")
+                if kandidat.exists() or vytvor_obalku(self.nazev_knihy or zaklad.stem, kandidat):
                     obalka_cesta = kandidat
                     self.log_z_vlakna(T("log_obalka", kandidat.name))
                     self.fronta.put(("obalka", str(kandidat)))
@@ -2271,44 +2752,136 @@ class Aplikace(tk.Tk):
                     self.log_z_vlakna(T("log_obalka_ne"))
 
             if p["poslouchat"]:
-                self.prehravac = Prehravac(self.engine.sr, p["naskok_s"], self.log_z_vlakna)
+                self.prehravac = Prehravac(sr, p["naskok_s"], self.log_z_vlakna)
                 if not self.prehravac.start():
                     self.prehravac = None
 
+            hotove = list(postup.data.get("hotove_soubory") or []) if postup else []
+            otisk = p["otisk"]
+
+            def cesta_kapitoly(kap_i):
+                nazev = (self.kapitoly[kap_i].get("nazev") or "").strip()
+                nazev = re.sub(ZAKAZANE_ZNAKY, "", nazev)[:60].strip(" .")
+                jmeno = "{:02d}".format(kap_i + 1) + (" - " + nazev if nazev else "")
+                return slozka / (jmeno + ".wav")
+
+            def uzavri_a_preved(kap_i, dokoncena=True):
+                """Kapitolu dopsat a případně převést na MP3.
+
+                Nedokončenou kapitolu na MP3 převádět nesmíme - do MP3 už se
+                nedá dopisovat, takže by se na ni po přerušení nedalo navázat.
+                Zůstane jako WAV a doplní se při dalším běhu.
+                """
+                if self._zapisovac is None:
+                    return
+                z = self._zapisovac
+                delka = z.delka_s
+                wav = z.cesta
+                z.zavri()
+                self._zapisovac = None
+                if delka <= 0:
+                    wav.unlink(missing_ok=True)
+                    return
+                if not dokoncena:
+                    self.log_z_vlakna(T("log_kapitola_rozdelana", wav.name))
+                    return
+                mp3 = wav.with_suffix(".mp3")
+                popis = self.kapitoly[kap_i].get("nazev") or wav.stem
+                meta = {"title": popis, "album": self.nazev_knihy or zaklad.stem,
+                        "track": str(kap_i + 1), "genre": "Audiobook"}
+                if prevod_na_mp3(wav, mp3, p["bitrate"], meta, obalka_cesta):
+                    wav.unlink(missing_ok=True)       # WAV už není k ničemu
+                    hotove.append(mp3.name)
+                    self.log_z_vlakna(T("log_kapitola_hotova", kap_i + 1, mp3.name))
+                else:
+                    self.log_z_vlakna(T("log_mp3_selhal"))
+                    hotove.append(wav.name)
+
+            # --- navázání na rozepsaný soubor ---
+            self._zapisovac = None
+            aktualni_kap = -1
+            if od_bloku and postup is not None:
+                vzorku = int(postup.data.get("vzorku_v_aktualnim", 0))
+                rozepsany = postup.data.get("aktualni_wav") or ""
+                if rozepsany and vzorku > 0 and Path(rozepsany).exists():
+                    aktualni_kap = int(postup.data.get("kapitola", bloky[od_bloku][0]))
+                    self._zapisovac = WavZapisovacRaw(Path(rozepsany), sr, vzorku)
+                    self.log_z_vlakna(T("log_navazuji_soubor", Path(rozepsany).name,
+                                        formatuj_cas(self._zapisovac.delka_s)))
+
+            jediny_wav = slozka / (zaklad.stem + ".wav")
+
+            if pool is not None:
+                pool._dalsi = od_bloku + 1
+
             start = time.time()
 
-            for index, blok in enumerate(bloky, start=1):
-                # Pauza
-                while self.pause_event.is_set() and not self.stop_event.is_set():
-                    time.sleep(0.2)
-                if self.stop_event.is_set():
-                    self.log_z_vlakna(T("log_zastaveno_na", index, celkem))
-                    break
+            for index, kap_i, blok, vzorky in self._proud_bloku(bloky, p, od_bloku, pool):
+                # nová kapitola = nový soubor
+                if self._zapisovac is None or (po_kapitolach and kap_i != aktualni_kap):
+                    if po_kapitolach and self._zapisovac is not None:
+                        uzavri_a_preved(aktualni_kap)
+                    aktualni_kap = kap_i
+                    cil = cesta_kapitoly(kap_i) if po_kapitolach else jediny_wav
+                    self._zapisovac = WavZapisovacRaw(cil, sr)
 
-                vzorky = self._generuj_s_opakovanim(blok, p, index, celkem)
                 if vzorky is None:
                     neuspesne += 1
                 else:
-                    zapisovac.zapis(vzorky)
-                    zapisovac.zapis_ticho(p["pauza_ms"])
+                    self._zapisovac.zapis(vzorky)
+                    self._zapisovac.zapis_ticho(p["pauza_ms"])
                     if self.prehravac is not None and self.prehravac.bezi:
                         self.prehravac.pridej(vzorky, p["pauza_ms"])
 
+                if postup is not None:
+                    postup.uloz(otisk, index, celkem, hotove, str(self._zapisovac.cesta),
+                                self._zapisovac.pocet_vzorku, aktualni_kap)
+
                 znaku_hotovo += len(blok)
                 uplynulo = time.time() - start
-                rychlost = znaku_hotovo / uplynulo if uplynulo > 0 else 0
+                rychlost = (znaku_hotovo - znaku_pred) / uplynulo if uplynulo > 0 else 0
                 zbyva = (znaku_celkem - znaku_hotovo) / rychlost if rychlost > 0 else -1
                 self.fronta.put(("postup", (index, celkem, uplynulo, zbyva)))
 
                 if index % 25 == 0:
                     self.log_z_vlakna(T("log_prubeh", index, celkem,
-                                        formatuj_cas(zapisovac.delka_s),
+                                        formatuj_cas(self._zapisovac.delka_s),
                                         formatuj_cas(uplynulo), formatuj_cas(zbyva)))
                     self._vycisti_vram()
 
-            delka = zapisovac.delka_s
-            zapisovac.zavri()
-            zapisovac = None
+            if pool is not None:
+                pool.ukonci()
+                pool = None
+
+            zastaveno = self.stop_event.is_set()
+
+            if po_kapitolach:
+                if self._zapisovac is not None:
+                    uzavri_a_preved(aktualni_kap, dokoncena=not zastaveno)
+                vysledek = slozka
+                souhrn = T("log_souhrn_kapitoly", len(hotove))
+            else:
+                delka = self._zapisovac.delka_s if self._zapisovac else 0.0
+                if self._zapisovac is not None:
+                    self._zapisovac.zavri()
+                    self._zapisovac = None
+                if delka <= 0:
+                    raise RuntimeError("Nevygenerovalo se žádné audio.")
+                vysledek = jediny_wav
+                if p["format"] == "MP3":
+                    self.fronta.put(("stav", T("stav_mp3")))
+                    self.log_z_vlakna(T("log_mp3"))
+                    mp3 = jediny_wav.with_suffix(".mp3")
+                    meta = {"title": self.nazev_knihy or zaklad.stem, "genre": "Audiobook",
+                            "comment": "Vytvořeno pomocí Chatterbox TTS"}
+                    if prevod_na_mp3(jediny_wav, mp3, p["bitrate"], meta, obalka_cesta):
+                        jediny_wav.unlink(missing_ok=True)   # při MP3 WAV neuchováváme
+                        vysledek = mp3
+                        self.log_z_vlakna(T("log_mp3_hotovo", mp3))
+                    else:
+                        self.log_z_vlakna(T("log_mp3_selhal"))
+                velikost = vysledek.stat().st_size / (1024 * 1024) if vysledek.exists() else 0.0
+                souhrn = T("log_souhrn", formatuj_cas(delka), velikost)
 
             if self.prehravac is not None and self.prehravac.bezi:
                 zbyva_s = self.prehravac.zasoba_s
@@ -2316,70 +2889,84 @@ class Aplikace(tk.Tk):
                     self.log_z_vlakna(T("log_dobira", formatuj_cas(zbyva_s)))
                 self.prehravac.uzavri_vstup()
 
-            if delka <= 0:
-                raise RuntimeError("Nevygenerovalo se žádné audio.")
-
-            vysledek = wav_cesta
-            if p["format"] == "MP3":
-                self.fronta.put(("stav", T("stav_mp3")))
-                self.log_z_vlakna(T("log_mp3"))
-                mp3_cesta = wav_cesta.with_suffix(".mp3")
-                metadata = {"title": wav_cesta.stem, "genre": "Audiobook",
-                            "comment": "Vytvořeno pomocí Chatterbox TTS"}
-                if prevod_na_mp3(wav_cesta, mp3_cesta, p["bitrate"], metadata, obalka_cesta):
-                    vysledek = mp3_cesta
-                    self.log_z_vlakna(T("log_mp3_hotovo", mp3_cesta))
+            if postup is not None:
+                if zastaveno:
+                    # Doplnit seznam hotových kapitol - v cyklu se ukládá
+                    # ještě před jejich převodem na MP3.
+                    postup.uloz(otisk, postup.hotovo_bloku, celkem, hotove,
+                                postup.data.get("aktualni_wav", ""),
+                                postup.data.get("vzorku_v_aktualnim", 0),
+                                postup.data.get("kapitola", 0))
                 else:
-                    self.log_z_vlakna(T("log_mp3_selhal"))
+                    postup.smaz()      # doběhlo celé, není na co navazovat
 
-            velikost = vysledek.stat().st_size / (1024 * 1024)
-            self.log_z_vlakna(
-                (T("log_zastaveno_ul") if self.stop_event.is_set() else T("log_hotovo"))
-                + T("log_souhrn", formatuj_cas(delka), velikost)
-                + (T("log_neuspesne", neuspesne) if neuspesne else ""))
+            self.log_z_vlakna((T("log_zastaveno_ul") if zastaveno else T("log_hotovo")) + souhrn
+                              + (T("log_neuspesne", neuspesne) if neuspesne else ""))
+            if zastaveno and postup is not None:
+                self.log_z_vlakna(T("log_lze_navazat"))
             self.fronta.put(("hotovo", str(vysledek)))
 
         except Exception as chyba:
-            if zapisovac is not None:
-                zapisovac.zavri()
+            if getattr(self, "_zapisovac", None) is not None:
+                self._zapisovac.zavri()
+                self._zapisovac = None
             if self.prehravac is not None:
                 self.prehravac.zastav()
             self.log_z_vlakna(T("log_chyba", chyba))
             self.log_z_vlakna(traceback.format_exc(limit=5))
             self.fronta.put(("chyba", str(chyba)))
 
+    def _proud_bloku(self, bloky, p, od_bloku, pool):
+        """Vydává (index, kapitola, text, vzorky) v původním pořadí.
+
+        Jedna cesta pro obě varianty - buď se generuje rovnou, nebo se bloky
+        rozešlou pracovníkům a tady se počká, až dojde ten, který je na řadě.
+        """
+        celkem = len(bloky)
+
+        def cekej_na_pauzu():
+            while self.pause_event.is_set() and not self.stop_event.is_set():
+                time.sleep(0.2)
+
+        if pool is None:
+            for index, (kap_i, blok) in enumerate(bloky, start=1):
+                if index <= od_bloku:
+                    continue
+                cekej_na_pauzu()
+                if self.stop_event.is_set():
+                    self.log_z_vlakna(T("log_zastaveno_na", index, celkem))
+                    return
+                yield index, kap_i, blok, self._generuj_s_opakovanim(blok, p, index, celkem)
+            return
+
+        odeslano = od_bloku
+        okno = max(2, len(pool.procesy) * 2)     # kolik bloků držet rozpracovaných
+        hotovo = od_bloku
+
+        while hotovo < celkem:
+            while (odeslano < celkem and odeslano - hotovo < okno
+                   and not self.stop_event.is_set() and not self.pause_event.is_set()):
+                pool.posli(odeslano + 1, bloky[odeslano][1], celkem, p)
+                odeslano += 1
+
+            cekej_na_pauzu()
+            if self.stop_event.is_set():
+                self.log_z_vlakna(T("log_zastaveno_na", hotovo + 1, celkem))
+                return
+
+            if odeslano == hotovo:            # po pauze nemusí být co odebírat
+                continue
+
+            vysledek = pool.vezmi()
+            if vysledek is None:
+                raise RuntimeError(pool.chyba or "generující proces selhal")
+            index, vzorky = vysledek
+            pool.potvrd()
+            hotovo = index
+            yield index, bloky[index - 1][0], bloky[index - 1][1], vzorky
+
     def _generuj_s_opakovanim(self, blok: str, p: dict, index: int, celkem: int):
-        """Vygeneruje blok; hlídá halucinační smyčky a při chybě to zkusí znovu."""
-        import numpy as np
-
-        # Hrubý horní odhad délky: české čtení jede kolem 12-16 znaků/s
-        max_ocekavana_delka = len(blok) / 8.0 + 3.0
-
-        for pokus in range(1, 4):
-            try:
-                if pokus > 1:
-                    nastav_seed(int(time.time() * 1000) % 999983)
-                vzorky = self.engine.generuj(blok, p["referencni_wav"], p["exaggeration"],
-                                             p["cfg_weight"], p["temperature"])
-                delka = len(vzorky) / float(self.engine.sr)
-
-                if delka > max_ocekavana_delka and pokus < 3:
-                    self.log_z_vlakna(T("log_dlouhy", index, celkem, delka, len(blok)))
-                    continue
-
-                if delka < 0.05:
-                    self.log_z_vlakna(T("log_prazdny", index, celkem))
-                    continue
-
-                return vzorky
-
-            except Exception as chyba:
-                self.log_z_vlakna(T("log_pokus", index, celkem, pokus, chyba))
-                self._vycisti_vram()
-                time.sleep(0.5)
-
-        self.log_z_vlakna(T("log_preskocen", index, celkem, blok[:60]))
-        return None
+        return generuj_blok(self.engine, blok, p, index, celkem, self.log_z_vlakna)
 
     def _vycisti_vram(self):
         try:
@@ -2448,6 +3035,9 @@ class Aplikace(tk.Tk):
 
 
 def main():
+    import multiprocessing
+    multiprocessing.freeze_support()
+
     try:
         # Ostřejší vykreslení GUI na HiDPI monitorech
         import ctypes

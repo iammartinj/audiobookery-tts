@@ -34,8 +34,8 @@ no cloud service, no account, and no per-character billing. Built on
 | Disk | ~8 GB — 3 GB base model, 2.5 GB PyTorch, 2.1 GB per language checkpoint |
 | Optional | `ffmpeg` on PATH for MP3 export |
 
-Measured on an RTX 2080 Ti: about **1× realtime** and ~3.3 GB VRAM. An
-eight-hour audiobook takes roughly eight hours to generate.
+Measured on an RTX 2080 Ti: **1.44× realtime** with two parallel processes,
+0.91× with one. An eight-hour audiobook takes about five and a half hours.
 
 ## Getting started
 
@@ -68,15 +68,11 @@ narration.
 
 ### Listening while it converts
 
-Generation runs slightly slower than playback (~0.95×), so the buffer drains
-gradually. Audiobookery waits until a **head start** has accumulated and then
-starts playing. The buffer shrinks about twenty times slower than it grows:
-
-| head start | uninterrupted listening |
-|---|---|
-| 1 min | ~20 minutes |
-| 3 min | ~1 hour |
-| 30 min | a whole eight-hour book |
+With parallel generation the buffer **grows** while you listen, so a head start
+of a minute or two is enough and you can keep listening indefinitely. On a
+single process generation runs slightly slower than playback (0.91×) and the
+buffer drains — roughly twenty times slower than it fills, so a three-minute
+head start buys about an hour.
 
 If the buffer does run dry, playback waits for the next block. Nothing breaks.
 
@@ -96,6 +92,54 @@ ffmpeg -y -ss 47.65 -t 14 -i source.mp3 -vn -ac 1 -ar 24000 -af "loudnorm=I=-20:
 
 Avoid the very beginning of a recording — it usually holds a jingle or a title
 announcement in a different voice.
+
+## Parallel generation
+
+Generation is not limited by the GPU's compute power. Measured during a single
+stream, the card sits at **38 % utilisation with 15 % memory bandwidth** — the
+bottleneck is per-token overhead, not arithmetic. The fix is genuine
+parallelism, which Python threads cannot provide because of the GIL.
+
+Audiobookery therefore runs several **separate processes**, each with its own
+copy of the model, and reassembles the blocks in order. Measured on an
+RTX 2080 Ti:
+
+| processes | speed | GPU |
+|---|---|---|
+| 1 | 0.91× realtime | 38 % |
+| 2 | **1.44× realtime** | 100 % |
+
+The number of processes is chosen from free VRAM (~4.3 GB each) and capped at
+four; set it manually under *advanced settings*, or leave it at 0 for automatic.
+When more than one process is used the parent does not load a model at all —
+that memory goes to a worker instead.
+
+Each block's seed is derived from its index, so the result does not depend on
+how many processes are running or which one happened to take the block.
+
+## Chapters and resuming
+
+**Chapters.** EPUB and FB2 carry their own chapter structure, so Audiobookery
+uses it: with MP3 output you get one file per chapter, numbered and named after
+the chapter, each with the cover embedded and proper track metadata. Plain text
+has no reliable structure to read, so it stays a single file.
+
+Choosing MP3 means the intermediate WAV is deleted once the conversion
+succeeds — no 2 GB leftovers.
+
+**Resuming.** An eight-hour book is an overnight job, and things get in the way:
+a power cut, a reboot, needing the GPU for something else. A progress file is
+written next to the output after every block, recording the source fingerprint,
+the block reached and the exact sample count in the file being written.
+
+Start the same book again and Audiobookery offers to continue where it stopped.
+The unfinished chapter is truncated to the last recorded sample — so a block cut
+in half by a crash is discarded rather than left as a glitch — and generation
+picks up from the next block.
+
+The fingerprint covers the source file and every setting that affects the sound.
+Change the voice, the language or the temperature and resuming is refused, since
+the second half of the book would not match the first.
 
 ## Languages
 
