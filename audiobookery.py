@@ -55,7 +55,7 @@ APP_NAME = "Audiobookery"
 
 # Znaky, které Windows v názvu souboru nedovolí
 ZAKAZANE_ZNAKY = r'[<>:"/\|?*]'
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 KATALOG_PATH = APP_DIR / "modely.json"
 
@@ -2868,7 +2868,11 @@ class Aplikace(tk.Tk):
                 if delka <= 0:
                     raise RuntimeError("Nevygenerovalo se žádné audio.")
                 vysledek = jediny_wav
-                if p["format"] == "MP3":
+                # Při zastavení se na MP3 nepřevádí. Do MP3 se nedá dopisovat,
+                # takže by převod rozdělanou knihu uzavřel a navázat by nešlo.
+                if p["format"] == "MP3" and zastaveno:
+                    self.log_z_vlakna(T("log_wav_ponechan", jediny_wav.name))
+                elif p["format"] == "MP3":
                     self.fronta.put(("stav", T("stav_mp3")))
                     self.log_z_vlakna(T("log_mp3"))
                     mp3 = jediny_wav.with_suffix(".mp3")

@@ -286,6 +286,8 @@ TEXTY = {
                          "pokračuji jedním procesem."),
     "log_pool_jeden":   ("Generating in a single process.", "Generuji jedním procesem."),
     "lab_pracovniku":   ("parallel processes", "souběžných procesů"),
+    "log_wav_ponechan": ("Left as {0} - MP3 conversion happens once the book is finished.",
+                         "Ponecháno jako {0} - na MP3 se převede až po dokončení knihy."),
     "dlg_navazat":      ("Resume", "Navázat"),
     "dlg_navazat_text": ("This book was interrupted at block {0} of {1} ({2:.0f} %).\n\nYes - continue where it stopped\nNo - start over\nCancel - do nothing",
                          "Tato kniha byla přerušena na bloku {0} z {1} ({2:.0f} %).\n\nAno - pokračovat tam, kde to skončilo\nNe - začít znovu\nZrušit - neprovádět nic"),

@@ -144,7 +144,9 @@ the chapter, each with the cover embedded and proper track metadata. Plain text
 has no reliable structure to read, so it stays a single file.
 
 Choosing MP3 means the intermediate WAV is deleted once the conversion
-succeeds — no 2 GB leftovers.
+succeeds — no 2 GB leftovers. If the run is interrupted, the WAV is kept
+instead: MP3 cannot be appended to, so converting a half-finished book would
+close the door on resuming it.
 
 **Resuming.** An eight-hour book is an overnight job, and things get in the way:
 a power cut, a reboot, needing the GPU for something else. A progress file is
