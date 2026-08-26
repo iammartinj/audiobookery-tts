@@ -55,7 +55,7 @@ APP_NAME = "Audiobookery"
 
 # Znaky, které Windows v názvu souboru nedovolí
 ZAKAZANE_ZNAKY = r'[<>:"/\|?*]'
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 
 KATALOG_PATH = APP_DIR / "modely.json"
 
@@ -111,6 +111,9 @@ DEFAULT_CONFIG = {
     "exaggeration": 0.5,
     "cfg_weight": 0.5,
     "temperature": 0.8,
+    # Ponecháno na výchozí hodnotě knihovny. Zvyšování se měřením neosvědčilo:
+    # lupance v tichu neubyly a přibylo vynucené ukončování kvůli zacyklení.
+    "min_p": 0.05,
     "seed": 0,
     # Jazyk syntézy je nezávislý na jazyku rozhraní - v českém rozhraní
     # klidně vyrábíte anglickou audioknihu.
@@ -791,7 +794,7 @@ def otisk_zadani(cesta_knihy: Path, p: dict, celkem_bloku: int) -> str:
     except Exception:
         h.update(str(cesta_knihy).encode("utf-8"))
     for klic in ("jazyk_textu", "referencni_wav", "exaggeration", "cfg_weight",
-                 "temperature", "seed", "pauza_ms", "format", "bitrate"):
+                 "temperature", "min_p", "seed", "pauza_ms", "format", "bitrate"):
         h.update(f"{klic}={p.get(klic)}".encode("utf-8"))
     h.update(f"bloku={celkem_bloku}".encode("utf-8"))
     ref = p.get("referencni_wav")
@@ -1398,14 +1401,21 @@ class TtsEngine:
 
     # ------------------------------------------------------------------
     def generuj(self, text: str, referencni_wav: str, exaggeration: float,
-                cfg_weight: float, temperature: float):
-        """Vrátí numpy pole float32 (mono) s vygenerovanou řečí."""
+                cfg_weight: float, temperature: float, min_p: float = 0.05):
+        """Vrátí numpy pole float32 (mono) s vygenerovanou řečí.
+
+        min_p odřezává ocas rozdělení pravděpodobností. Práh je relativní k
+        nejlepšímu tokenu, takže tam, kde si je model jistý, nic nezmění, a
+        tam, kde váhá, nechá alternativy žít. Zmizí jen tokeny řádově méně
+        pravděpodobné než ten nejlepší - a odtud pocházejí lupance v tichu.
+        """
         import numpy as np
 
         argumenty = dict(
             exaggeration=float(exaggeration),
             cfg_weight=float(cfg_weight),
             temperature=float(temperature),
+            min_p=float(min_p),
         )
         if referencni_wav and Path(referencni_wav).exists():
             argumenty["audio_prompt_path"] = referencni_wav
@@ -1469,7 +1479,8 @@ def generuj_blok(engine, blok: str, p: dict, index: int, celkem: int, log) -> ob
             if pokus > 1:
                 nastav_seed(int(time.time() * 1000) % 999983)
             vzorky = engine.generuj(blok, p["referencni_wav"], p["exaggeration"],
-                                    p["cfg_weight"], p["temperature"])
+                                    p["cfg_weight"], p["temperature"],
+                                    p.get("min_p", 0.05))
             delka = len(vzorky) / float(engine.sr)
 
             if delka > max_delka and pokus < 3:
@@ -1684,6 +1695,7 @@ class Aplikace(tk.Tk):
             "exaggeration": float(self.var_exag.get()),
             "cfg_weight": float(self.var_cfg.get()),
             "temperature": float(self.var_temp.get()),
+            "min_p": float(self.var_min_p.get()),
             "seed": int(self.var_seed.get() or 0),
             "jazyk_textu": self._klic_jazyka_textu(),
             "zarizeni": self.var_zarizeni.get(),
@@ -1759,6 +1771,7 @@ class Aplikace(tk.Tk):
         self.var_exag = tk.DoubleVar(value=c["exaggeration"])
         self.var_cfg = tk.DoubleVar(value=c["cfg_weight"])
         self.var_temp = tk.DoubleVar(value=c["temperature"])
+        self.var_min_p = tk.DoubleVar(value=c["min_p"])
         self.var_seed = tk.IntVar(value=c["seed"])
         self.var_jazyk_textu = tk.StringVar(value=self._nazev_jazyka_textu(c["jazyk_textu"]))
         self.var_zarizeni = tk.StringVar(value=c["zarizeni"])
@@ -1955,12 +1968,13 @@ class Aplikace(tk.Tk):
         posuvnik(0, T("lab_expresivita"), self.var_exag, 0.25, 1.0, "exag")
         posuvnik(1, T("lab_cfg"), self.var_cfg, 0.0, 1.0, "cfg")
         posuvnik(2, T("lab_teplota"), self.var_temp, 0.05, 1.5, "temp")
+        posuvnik(3, T("lab_min_p"), self.var_min_p, 0.0, 0.30, "minp")
         cislo(0, T("lab_znaku"), self.var_max_znaku, 80, 400, 10)
         cislo(1, T("lab_pauza_ms"), self.var_pauza, 0, 2000, 50)
         cislo(2, T("lab_seed"), self.var_seed, 0, 999999, 1)
 
         spodek = ttk.Frame(gen)
-        spodek.grid(row=3, column=0, columnspan=5, sticky="ew", pady=(14, 0))
+        spodek.grid(row=4, column=0, columnspan=5, sticky="ew", pady=(14, 0))
         ttk.Label(spodek, text=T("lab_zarizeni")).pack(side="left", padx=(0, 12))
         cb = ttk.Combobox(spodek, textvariable=self.var_zarizeni, width=6, state="readonly",
                           values=["auto", "cuda", "cpu"])
@@ -2565,7 +2579,8 @@ class Aplikace(tk.Tk):
             self.log_z_vlakna(T("log_generuji_uk"))
             start = time.time()
             vzorky = self.engine.generuj(veta, p["referencni_wav"], p["exaggeration"],
-                                         p["cfg_weight"], p["temperature"])
+                                         p["cfg_weight"], p["temperature"],
+                                         p.get("min_p", 0.05))
 
             vystup = TEMP_DIR / "test_hlasu.wav"
             zapisovac = WavZapisovac(vystup, self.engine.sr)
@@ -2590,6 +2605,7 @@ class Aplikace(tk.Tk):
             "exaggeration": float(self.var_exag.get()),
             "cfg_weight": float(self.var_cfg.get()),
             "temperature": float(self.var_temp.get()),
+            "min_p": float(self.var_min_p.get()),
             "seed": int(self.var_seed.get() or 0),
             "zarizeni": self.var_zarizeni.get(),
             "jazyk_textu": self._klic_jazyka_textu(),

@@ -65,6 +65,7 @@ TEXTY = {
     "lab_teplota":      ("temperature", "teplota"),
     "lab_znaku":        ("chars per block", "znaků na blok"),
     "lab_pauza_ms":     ("gap (ms)", "pauza (ms)"),
+    "lab_min_p":        ("min_p (tail cut)", "min_p (ořez ocasu)"),
     "lab_seed":         ("seed", "seed"),
     "lab_zarizeni":     ("device", "zařízení"),
     "lab_jazyk_textu":  ("book language", "jazyk knihy"),

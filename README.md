@@ -136,6 +136,40 @@ If you want to keep the card free, set *parallel processes* to **1**. That drops
 the speed to 0.91× realtime but leaves the GPU at around 38 %, which is what the
 application did before this feature existed.
 
+### min_p, and a measurement that failed
+
+Occasional short clicks appear in quiet passages. Measuring a six-minute
+recording against its reference clip pinned down where they come from:
+
+| | generated | reference |
+|---|---|---|
+| noise floor in silence | −57 dBFS | −58 dBFS |
+| spikes in silence (\|x\| > 0.02) | 53 | 0 |
+
+The **noise floor is faithfully cloned** from the reference — room tone and all —
+which is expected. The spikes are not in the reference at all, and they sit
+seconds away from block joins, so they are neither the concatenation nor the
+inserted pauses. The model produces them.
+
+The obvious suspect was low-probability token sampling, so `min_p` is now
+exposed under *advanced settings*. It cuts the tail of the probability
+distribution using a threshold relative to the best token, which in theory
+removes glitch tokens without flattening natural variation.
+
+**It did not work.** Measured over 280 s per setting with identical seeds:
+
+| min_p | clusters | per minute | forced EOS (repetition) |
+|---|---|---|---|
+| 0.05 (default) | 21 | 4.5 | 1 |
+| 0.12 | 25 | 5.3 | 2 |
+| 0.20 | — | 6.6 | — |
+
+Raising it did not reduce the clicks and mildly increased the repetition stalls
+that the alignment analyser has to break by forcing an end-of-speech token. The
+default therefore stays at the library's 0.05. The control is left in place for
+anyone who wants to experiment — and so the negative result is on record rather
+than repeated.
+
 ## Chapters and resuming
 
 **Chapters.** EPUB and FB2 carry their own chapter structure, so Audiobookery
