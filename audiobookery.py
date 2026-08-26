@@ -55,7 +55,95 @@ APP_NAME = "Audiobookery"
 
 # Znaky, které Windows v názvu souboru nedovolí
 ZAKAZANE_ZNAKY = r'[<>:"/\|?*]'
-VERSION = "1.3.0"
+VERSION = "1.4.0"
+
+VYSLOVNOST_PATH = APP_DIR / "vyslovnost.json"
+
+
+def nacti_vyslovnost() -> dict:
+    """Načte slovníček výslovnosti. Chybějící nebo rozbitý soubor se přejde."""
+    try:
+        data = json.loads(VYSLOVNOST_PATH.read_text(encoding="utf-8"))
+        nahrady = data.get("nahrady") or {}
+        return {str(k): str(v) for k, v in nahrady.items() if k and v}
+    except Exception:
+        return {}
+
+
+VYSLOVNOST = nacti_vyslovnost()
+
+
+def _sestav_vzor(nahrady: dict):
+    """Jeden regulární výraz pro všechna pravidla naráz.
+
+    Delší klíče musí jít první, jinak by kratší ukousl začátek delšího.
+    Hvězdička na konci znamená předponu - zbytek slova zůstane, jak byl,
+    což u ohýbané češtiny šetří vypisování všech pádů.
+    """
+    if not nahrady:
+        return None, {}
+
+    casti, mapa = [], {}
+    for i, klic in enumerate(sorted(nahrady, key=len, reverse=True)):
+        jmeno = f"v{i}"
+        predpona = klic.endswith("*")
+        holy = klic[:-1] if predpona else klic
+        if not holy:
+            continue
+        # \b na začátku drží náhradu na hranici slova, takže klíč 'ti'
+        # nikdy nesáhne doprostřed slova 'politika'
+        telo = re.escape(holy) + (r"\w*" if predpona else r"\b")
+        casti.append(f"(?P<{jmeno}>\\b{telo})")
+        mapa[jmeno] = (holy, nahrady[klic], predpona)
+
+    if not casti:
+        return None, {}
+    return re.compile("|".join(casti), re.IGNORECASE | re.UNICODE), mapa
+
+
+VZOR_VYSLOVNOSTI, MAPA_VYSLOVNOSTI = _sestav_vzor(VYSLOVNOST)
+
+
+def uprav_vyslovnost(text: str):
+    """Přepíše text podle slovníčku. Vrací (text, počet_náhrad)."""
+    if VZOR_VYSLOVNOSTI is None or not text:
+        return text, 0
+
+    pocet = 0
+
+    def nahrad(shoda):
+        nonlocal pocet
+        jmeno = shoda.lastgroup
+        if jmeno not in MAPA_VYSLOVNOSTI:
+            return shoda.group(0)
+        holy, cil, predpona = MAPA_VYSLOVNOSTI[jmeno]
+        nalezene = shoda.group(0)
+
+        if predpona:
+            zbytek = nalezene[len(holy):]
+            novy = (cil[:-1] if cil.endswith("*") else cil) + zbytek
+        else:
+            novy = cil
+
+        # zachovat velikost písmen originálu - celé verzálky se u nadpisů
+        # kapitol vyskytují běžně, tak ať se z nich nestane Ťichý
+        if len(nalezene) > 1 and nalezene.isupper():
+            novy = novy.upper()
+        elif nalezene[:1].isupper():
+            novy = novy[:1].upper() + novy[1:]
+        pocet += 1
+        return novy
+
+    return VZOR_VYSLOVNOSTI.sub(nahrad, text), pocet
+
+
+def otisk_vyslovnosti() -> str:
+    """Otisk slovníčku - mění zvuk, takže patří do otisku rozdělané knihy."""
+    import hashlib
+
+    polozky = "|".join(f"{k}={v}" for k, v in sorted(VYSLOVNOST.items()))
+    return hashlib.sha256(polozky.encode("utf-8")).hexdigest()[:16]
+
 
 KATALOG_PATH = APP_DIR / "modely.json"
 
@@ -799,6 +887,7 @@ def otisk_zadani(cesta_knihy: Path, p: dict, celkem_bloku: int) -> str:
                  "format", "bitrate"):
         h.update(f"{klic}={p.get(klic)}".encode("utf-8"))
     h.update(f"bloku={celkem_bloku}".encode("utf-8"))
+    h.update(otisk_vyslovnosti().encode("utf-8"))
     ref = p.get("referencni_wav")
     if ref and Path(ref).exists():
         h.update(str(Path(ref).stat().st_mtime_ns).encode("utf-8"))
@@ -2618,8 +2707,11 @@ class Aplikace(tk.Tk):
             # se pak výstup rozpadne na soubory.
             self.kapitoly = []
             self.bloky = []
+            nahrazeno = 0
             for i, kap in enumerate(kapitoly):
                 text = normalizuj_text(kap["text"])
+                text, kolik = uprav_vyslovnost(text)
+                nahrazeno += kolik
                 if not text.strip():
                     continue
                 bloky = rozdel_na_bloky(text, max_znaku)
@@ -2642,6 +2734,8 @@ class Aplikace(tk.Tk):
             self.log(T("log_nacteno", znaku, len(self.bloky), max_znaku))
             if self.ma_kapitoly:
                 self.log(T("log_kapitoly", len(self.kapitoly)))
+            if nahrazeno:
+                self.log(T("log_vyslovnost", nahrazeno, len(VYSLOVNOST)))
             self.log(T("log_ukazka_bloku", self.bloky[0][1][:120]))
         except Exception as chyba:
             self.bloky = []

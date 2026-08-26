@@ -264,6 +264,8 @@ TEXTY = {
     "log_poslech_pauza": ("Playback paused, the buffer keeps growing.",
                           "Poslech pozastaven, zásoba mezitím roste."),
     "log_poslech_hraj": ("Resuming playback.", "Pokračuji v poslechu."),
+    "log_vyslovnost":   ("Pronunciation dictionary: {0} replacements from {1} rules.",
+                         "Slovníček výslovnosti: {0} náhrad podle {1} pravidel."),
     "log_kapitoly":     ("Chapters detected: {0}", "Rozpoznáno kapitol: {0}"),
     "log_po_kapitolach": ("Writing one MP3 per chapter ({0} chapters).",
                           "Zapisuji jeden MP3 na kapitolu ({0} kapitol)."),

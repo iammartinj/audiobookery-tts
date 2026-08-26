@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "Slovníček výslovnosti. Text se před syntézou přepíše podle těchto pravidel.",
+    "",
+    "K čemu to je: model občas přečte slovo špatně. U češtiny typicky splete",
+    "měkkost - 'tichý' přečte jako 'tychý', protože pravidlo di/ti/ni proti",
+    "dy/ty/ny z písmen samo nevyplývá. Napsat 'ťichý' ho donutí číst měkce.",
+    "Stejně tak jde cizí jméno přepsat foneticky: 'Shakespeare' -> 'Šejkspír'.",
+    "",
+    "Jak se to chová:",
+    "  - nahrazuje se po celých slovech, ne uvnitř nich, takže klíč 'ti'",
+    "    nikdy nesáhne na 'politika',",
+    "  - velikost prvního písmene se zachová: 'Tichý' -> 'Ťichý',",
+    "  - hvězdička na konci klíče znamená předponu. 'tich*' -> 'ťich*'",
+    "    pokryje tichý, tichá, tiché, tichého i tichem, což se u češtiny",
+    "    hodí, protože jinak byste musel vypsat každý pád zvlášť.",
+    "",
+    "Přidávejte jen slova, u kterých vadu opravdu slyšíte. Plošné pravidlo",
+    "'ti -> ťi' by rozbilo přejatá slova jako politika nebo matematika,",
+    "která se čtou tvrdě - proto je tenhle seznam ruční."
+  ],
+
+  "nahrady": {
+    "tich*": "ťich*"
+  }
+}

@@ -195,6 +195,40 @@ default therefore stays at the library's 0.05. The control is left in place for
 anyone who wants to experiment — and so the negative result is on record rather
 than repeated.
 
+## Fixing pronunciation
+
+Czech spelling hides a rule the letters do not carry: after **d, t, n** the
+vowel decides the consonant. *ti* is read soft, *ty* hard. The model sometimes
+gets this backwards and reads *tichý* as *tychý*. Writing **ťichý** forces the
+soft reading, and measurement over six seeds showed the unusual spelling does
+not destabilise generation — the length spread is the same as without it.
+
+[`vyslovnost.json`](vyslovnost.json) holds those rewrites. The same file solves
+foreign names, which the model reads with Czech spelling rules:
+
+```json
+{
+  "nahrady": {
+    "tich*": "ťich*",
+    "Shakespeare": "Šejkspír"
+  }
+}
+```
+
+Rules apply to whole words only, so a key never reaches inside another word —
+`ti` will not touch *politika*. Capitalisation is carried over, including full
+caps for chapter headings. A trailing `*` matches a prefix and keeps the rest
+of the word, which matters in an inflected language: `tich*` covers *tichý,
+tichá, tiché, tichého, tichem* without listing every case.
+
+**There is no blanket rule and there should not be.** Rewriting every *ti* to
+*ťi* would break loanwords — *politika*, *matematika*, *technika*, *diktát* are
+all read hard — trading an occasional error for a systematic one. Add only the
+words you actually hear going wrong.
+
+The dictionary is part of the resume fingerprint, so editing it stops a
+half-finished book from continuing with a different pronunciation.
+
 ## Chapters and resuming
 
 **Chapters.** EPUB and FB2 carry their own chapter structure, so Audiobookery
@@ -315,6 +349,7 @@ audiobookery/
   audiobookery.py      # the whole application
   preklady.py          # interface strings (en / cs)
   modely.json          # language catalogue
+  vyslovnost.json      # pronunciation rewrites
   run.bat              # install + launch
   requirements.txt
   fonts/               # bundled JetBrains Mono (OFL 1.1)
