@@ -55,7 +55,7 @@ APP_NAME = "Audiobookery"
 
 # Znaky, které Windows v názvu souboru nedovolí
 ZAKAZANE_ZNAKY = r'[<>:"/\|?*]'
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 KATALOG_PATH = APP_DIR / "modely.json"
 
@@ -114,6 +114,7 @@ DEFAULT_CONFIG = {
     # Ponecháno na výchozí hodnotě knihovny. Zvyšování se měřením neosvědčilo:
     # lupance v tichu neubyly a přibylo vynucené ukončování kvůli zacyklení.
     "min_p": 0.05,
+    "odstranit_lupance": True,
     "seed": 0,
     # Jazyk syntézy je nezávislý na jazyku rozhraní - v českém rozhraní
     # klidně vyrábíte anglickou audioknihu.
@@ -794,7 +795,8 @@ def otisk_zadani(cesta_knihy: Path, p: dict, celkem_bloku: int) -> str:
     except Exception:
         h.update(str(cesta_knihy).encode("utf-8"))
     for klic in ("jazyk_textu", "referencni_wav", "exaggeration", "cfg_weight",
-                 "temperature", "min_p", "seed", "pauza_ms", "format", "bitrate"):
+                 "temperature", "min_p", "odstranit_lupance", "seed", "pauza_ms",
+                 "format", "bitrate"):
         h.update(f"{klic}={p.get(klic)}".encode("utf-8"))
     h.update(f"bloku={celkem_bloku}".encode("utf-8"))
     ref = p.get("referencni_wav")
@@ -1466,6 +1468,97 @@ def nastav_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
+def odstran_lupance(vzorky, sr: int, zapnuto: bool = True):
+    """Ztlumí krátké impulzy v pauzách. Mimo pauzy se nezmění ani jeden vzorek.
+
+    Model občas v tichých pasážích vygeneruje submilisekundový impulz, který
+    trčí kolem 20 dB nad šumovým dnem a je slyšet jako lupnutí. Měření ukázalo,
+    že se od řeči odděluje spolehlivě: řečové špičky leží mimo dlouhé pauzy a
+    lupance trvají zlomek milisekundy, zatímco nádech stovky.
+
+    Postup drží tři pojistky:
+      - zasahuje se jen v pauzách delších než 150 ms,
+      - zúžených o 30 ms z každé strany, aby náběh a doznívání řeči zůstaly celé,
+      - a jen do impulzů kratších než 15 ms, což nádech neprojde.
+
+    Ztlumení je plynulé, ne useknutí - tvrdý řez by vyrobil vlastní lupnutí.
+    Pauza si ponechá naklonovaný šum místnosti, takže nezůstane hluchá.
+
+    Vrací (vzorky, počet_ztlumených_míst).
+    """
+    import numpy as np
+
+    d = np.asarray(vzorky, dtype="float32").reshape(-1)
+    if not zapnuto or len(d) < int(sr * 0.2):
+        return d, 0
+
+    okno = max(1, int(sr * 0.02))
+    env = np.sqrt(np.convolve(d.astype("float64") ** 2, np.ones(okno) / okno, mode="same"))
+    dno = float(np.percentile(env, 10))
+    if dno <= 1e-9:
+        return d, 0
+
+    # pauzy: obálka pod trojnásobkem šumového dna, souvisle aspoň 150 ms
+    tiche = env < dno * 3.0
+    hran = np.diff(np.concatenate(([0], tiche.view(np.int8), [0])))
+    zacatky, konce = np.flatnonzero(hran == 1), np.flatnonzero(hran == -1)
+
+    okraj = int(sr * 0.03)
+    min_pauza = int(sr * 0.15)
+    maska = np.zeros(len(d), dtype=bool)
+    for a, b in zip(zacatky, konce):
+        if (b - a) >= min_pauza and (b - a) > 2 * okraj:
+            maska[a + okraj:b - okraj] = True
+    if not maska.any():
+        return d, 0
+
+    prah = dno * 8.0
+    kandidati = np.flatnonzero((np.abs(d) > prah) & maska)
+    if not len(kandidati):
+        return d, 0
+
+    # seskupit, co je blíž než 5 ms
+    mezera = max(1, int(sr * 0.005))
+    shluky, akt = [], [kandidati[0]]
+    for s in kandidati[1:]:
+        if s - akt[-1] <= mezera:
+            akt.append(s)
+        else:
+            shluky.append((akt[0], akt[-1])); akt = [s]
+    shluky.append((akt[0], akt[-1]))
+
+    rampa = max(1, int(sr * 0.003))
+    max_delka = int(sr * 0.015)
+    zisk = np.ones(len(d), dtype="float32")
+    ztlumeno = 0
+
+    for a, b in shluky:
+        if (b - a + 1) > max_delka:
+            continue                      # příliš dlouhé - spíš nádech než lupanec
+        od, do = max(0, a - rampa), min(len(d), b + rampa + 1)
+        # ramp nesmí vylézt z pauzy ven
+        if not maska[od] or not maska[do - 1]:
+            od, do = max(od, a), min(do, b + 1)
+        spicka = float(np.abs(d[a:b + 1]).max())
+        if spicka <= 0:
+            continue
+        cil = min(1.0, (dno * 2.0) / spicka)
+
+        n = do - od
+        okno_zisk = np.full(n, cil, dtype="float32")
+        nab = min(rampa, a - od)
+        if nab > 0:
+            okno_zisk[:nab] = np.linspace(1.0, cil, nab, dtype="float32")
+        dob = min(rampa, do - b - 1)
+        if dob > 0:
+            okno_zisk[n - dob:] = np.linspace(cil, 1.0, dob, dtype="float32")
+        zisk[od:do] = np.minimum(zisk[od:do], okno_zisk)
+        ztlumeno += 1
+
+    if not ztlumeno:
+        return d, 0
+    return (d * zisk).astype("float32"), ztlumeno
+
 def generuj_blok(engine, blok: str, p: dict, index: int, celkem: int, log) -> object:
     """Vygeneruje blok; hlídá halucinační smyčky a při chybě to zkusí znovu.
 
@@ -1489,6 +1582,11 @@ def generuj_blok(engine, blok: str, p: dict, index: int, celkem: int, log) -> ob
             if delka < 0.05:
                 log(T("log_prazdny", index, celkem))
                 continue
+
+            vzorky, ztlumeno = odstran_lupance(vzorky, engine.sr,
+                                               p.get("odstranit_lupance", True))
+            if ztlumeno:
+                log(T("log_lupance", ztlumeno, index, celkem))
             return vzorky
         except Exception as chyba:
             log(T("log_pokus", index, celkem, pokus, chyba))
@@ -1696,6 +1794,7 @@ class Aplikace(tk.Tk):
             "cfg_weight": float(self.var_cfg.get()),
             "temperature": float(self.var_temp.get()),
             "min_p": float(self.var_min_p.get()),
+            "odstranit_lupance": bool(self.var_lupance.get()),
             "seed": int(self.var_seed.get() or 0),
             "jazyk_textu": self._klic_jazyka_textu(),
             "zarizeni": self.var_zarizeni.get(),
@@ -1772,6 +1871,7 @@ class Aplikace(tk.Tk):
         self.var_cfg = tk.DoubleVar(value=c["cfg_weight"])
         self.var_temp = tk.DoubleVar(value=c["temperature"])
         self.var_min_p = tk.DoubleVar(value=c["min_p"])
+        self.var_lupance = tk.BooleanVar(value=c["odstranit_lupance"])
         self.var_seed = tk.IntVar(value=c["seed"])
         self.var_jazyk_textu = tk.StringVar(value=self._nazev_jazyka_textu(c["jazyk_textu"]))
         self.var_zarizeni = tk.StringVar(value=c["zarizeni"])
@@ -1981,11 +2081,13 @@ class Aplikace(tk.Tk):
         cb.pack(side="left")
         ch2 = ttk.Checkbutton(spodek, text=T("lab_obalka"), variable=self.var_obalka)
         ch2.pack(side="left", padx=(28, 0))
+        ch3 = ttk.Checkbutton(spodek, text=T("lab_lupance"), variable=self.var_lupance)
+        ch3.pack(side="left", padx=(28, 0))
         ttk.Label(spodek, text=T("lab_pracovniku")).pack(side="left", padx=(28, 12))
         sp_w = ttk.Spinbox(spodek, from_=0, to=4, increment=1,
                            textvariable=self.var_pracovniku, width=5)
         sp_w.pack(side="left")
-        self._zamknout(cb, ch2, sp_w)
+        self._zamknout(cb, ch2, ch3, sp_w)
 
         # ---------------- Ovládání ----------------
         ovladani = ttk.Frame(hlavni)
@@ -2606,6 +2708,7 @@ class Aplikace(tk.Tk):
             "cfg_weight": float(self.var_cfg.get()),
             "temperature": float(self.var_temp.get()),
             "min_p": float(self.var_min_p.get()),
+            "odstranit_lupance": bool(self.var_lupance.get()),
             "seed": int(self.var_seed.get() or 0),
             "zarizeni": self.var_zarizeni.get(),
             "jazyk_textu": self._klic_jazyka_textu(),
