@@ -246,7 +246,14 @@ a power cut, a reboot, needing the GPU for something else. A progress file is
 written next to the output after every block, recording the source fingerprint,
 the block reached and the exact sample count in the file being written.
 
-Start the same book again and Audiobookery offers to continue where it stopped.
+**Pick up an unfinished book** with the *resume unfinished* button next to the
+start button. It scans the output folder for interrupted conversions and lists
+them with their progress, so you can come back to a book days later, even after
+converting something else in between. Selecting one restores the settings from
+the run that was interrupted — voice, language, temperature, output format —
+because the fingerprint would not match otherwise.
+
+Starting the same book again also offers to continue where it stopped.
 The unfinished chapter is truncated to the last recorded sample — so a block cut
 in half by a crash is discarded rather than left as a glitch — and generation
 picks up from the next block.

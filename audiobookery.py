@@ -55,7 +55,7 @@ APP_NAME = "Audiobookery"
 
 # Znaky, které Windows v názvu souboru nedovolí
 ZAKAZANE_ZNAKY = r'[<>:"/\|?*]'
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 VYSLOVNOST_PATH = APP_DIR / "vyslovnost.json"
 
@@ -894,6 +894,40 @@ def otisk_zadani(cesta_knihy: Path, p: dict, celkem_bloku: int) -> str:
     return h.hexdigest()[:32]
 
 
+def najdi_rozdelane(slozky) -> list:
+    """Najde rozdělané převody podle stavových souborů ve výstupních složkách."""
+    nalezene, videne = [], set()
+    for slozka in slozky:
+        try:
+            slozka = Path(slozka)
+            if not slozka.is_dir():
+                continue
+            for cesta in list(slozka.glob("*.progress.json")) + list(slozka.glob("*/*.progress.json")):
+                if cesta in videne:
+                    continue
+                videne.add(cesta)
+                try:
+                    d = json.loads(cesta.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                hotovo, celkem = int(d.get("hotovo_bloku", 0)), int(d.get("celkem_bloku", 0))
+                if not celkem or hotovo >= celkem or hotovo <= 0:
+                    continue
+                nalezene.append({
+                    "cesta": cesta,
+                    "nazev": d.get("nazev") or cesta.name.replace(".progress.json", ""),
+                    "hotovo": hotovo, "celkem": celkem,
+                    "procenta": 100.0 * hotovo / celkem,
+                    "zdroj": d.get("zdroj", ""),
+                    "parametry": d.get("parametry") or {},
+                    "kdy": cesta.stat().st_mtime,
+                })
+        except Exception:
+            continue
+    nalezene.sort(key=lambda x: -x["kdy"])
+    return nalezene
+
+
 class Postup:
     """Stav rozpracovaného převodu vedle výstupu."""
 
@@ -918,11 +952,16 @@ class Postup:
         return int(self.data.get("hotovo_bloku", 0))
 
     def uloz(self, otisk: str, hotovo: int, celkem: int, soubory: list,
-             aktualni_wav: str = "", vzorku: int = 0, kapitola: int = 0):
+             aktualni_wav: str = "", vzorku: int = 0, kapitola: int = 0,
+             zdroj: str = "", parametry: dict = None, nazev: str = ""):
+        # Zdroj a parametry se ukládají proto, aby šlo rozdělaný převod vybrat
+        # ze seznamu i po restartu, kdy má aplikace v polích něco jiného.
         self.data = {"verze": 1, "otisk": otisk, "hotovo_bloku": hotovo,
                      "celkem_bloku": celkem, "hotove_soubory": soubory,
                      "aktualni_wav": aktualni_wav, "vzorku_v_aktualnim": vzorku,
-                     "kapitola": kapitola}
+                     "kapitola": kapitola, "zdroj": zdroj or self.data.get("zdroj", ""),
+                     "nazev": nazev or self.data.get("nazev", ""),
+                     "parametry": parametry or self.data.get("parametry", {})}
         try:
             docasny = self.cesta.with_suffix(".tmp")
             docasny.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -1592,11 +1631,17 @@ def odstran_lupance(vzorky, sr: int, zapnuto: bool = True):
     hran = np.diff(np.concatenate(([0], tiche.view(np.int8), [0])))
     zacatky, konce = np.flatnonzero(hran == 1), np.flatnonzero(hran == -1)
 
-    okraj = int(sr * 0.03)
-    min_pauza = int(sr * 0.15)
+    # Krátké mezery mezi slovy se musely zahrnout taky - měření ukázalo, že
+    # nejvýraznější lupanec seděl v mezeře 92 ms, tedy pod původní hranicí.
+    # Okraj se proto škáluje s délkou mezery místo pevných 30 ms.
+    min_pauza = int(sr * 0.06)
     maska = np.zeros(len(d), dtype=bool)
     for a, b in zip(zacatky, konce):
-        if (b - a) >= min_pauza and (b - a) > 2 * okraj:
+        delka = b - a
+        if delka < min_pauza:
+            continue
+        okraj = min(int(sr * 0.03), int(delka * 0.25))
+        if delka > 2 * okraj:
             maska[a + okraj:b - okraj] = True
     if not maska.any():
         return d, 0
@@ -1805,6 +1850,93 @@ class Pool:
 # ==========================================================================
 #  GUI
 # ==========================================================================
+
+class DialogRozdelane(tk.Toplevel):
+    """Nabídka rozdělaných převodů. Vrací vybraný záznam, nebo None."""
+
+    def __init__(self, rodic, zaznamy, font_rodina):
+        super().__init__(rodic)
+        self.vybrany = None
+        self._zaznamy = zaznamy
+
+        self.title(T("dlg_rozdelane"))
+        self.configure(background=BARVY["pozadi"])
+        self.transient(rodic)
+        self.resizable(False, False)
+
+        ramec = ttk.Frame(self, padding=(22, 18, 22, 16))
+        ramec.pack(fill="both", expand=True)
+
+        ttk.Label(ramec, text=T("dlg_rozdelane_popis"),
+                  style="Tlumeny.TLabel").pack(anchor="w", pady=(0, 12))
+
+        seznam = tk.Frame(ramec, background=BARVY["panel"])
+        seznam.pack(fill="both", expand=True)
+
+        self.box = tk.Listbox(
+            seznam, height=min(10, max(3, len(zaznamy))), width=68,
+            font=(font_rodina, 9), activestyle="none",
+            background=BARVY["panel"], foreground=BARVY["text"],
+            selectbackground=BARVY["akcent"], selectforeground=BARVY["pozadi"],
+            relief="flat", borderwidth=0, highlightthickness=0)
+        self.box.pack(side="left", fill="both", expand=True, padx=10, pady=8)
+        posuv = ttk.Scrollbar(seznam, orient="vertical", command=self.box.yview,
+                              style="Tenky.Vertical.TScrollbar")
+        posuv.pack(side="right", fill="y")
+        self.box.configure(yscrollcommand=posuv.set)
+
+        for z in zaznamy:
+            kdy = time.strftime("%d.%m. %H:%M", time.localtime(z["kdy"]))
+            self.box.insert("end",
+                            f"  {z['nazev'][:34]:36} {z['procenta']:5.1f} %   "
+                            f"{z['hotovo']}/{z['celkem']}   {kdy}")
+        if zaznamy:
+            self.box.selection_set(0)
+        self.box.bind("<Double-Button-1>", lambda _u: self._potvrd())
+
+        self.popis = ttk.Label(ramec, text="", style="Tlumeny.TLabel", wraplength=520)
+        self.popis.pack(anchor="w", pady=(10, 0))
+        self.box.bind("<<ListboxSelect>>", lambda _u: self._obnov_popis())
+        self._obnov_popis()
+
+        tlacitka = ttk.Frame(ramec)
+        tlacitka.pack(fill="x", pady=(16, 0))
+        ttk.Button(tlacitka, text=T("btn_pokracovat_prevod"), style="Akce.TButton",
+                   command=self._potvrd).pack(side="left")
+        ttk.Button(tlacitka, text=T("btn_zrusit"), style="Tichy.TButton",
+                   command=self._zrus).pack(side="left", padx=(10, 0))
+
+        self.protocol("WM_DELETE_WINDOW", self._zrus)
+        self.bind("<Escape>", lambda _u: self._zrus())
+        self.bind("<Return>", lambda _u: self._potvrd())
+
+        self.update_idletasks()
+        x = rodic.winfo_rootx() + (rodic.winfo_width() - self.winfo_width()) // 2
+        y = rodic.winfo_rooty() + 120
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+        self.grab_set()
+        self.box.focus_set()
+
+    def _obnov_popis(self):
+        vyber = self.box.curselection()
+        if not vyber:
+            self.popis.config(text="")
+            return
+        z = self._zaznamy[vyber[0]]
+        zdroj = Path(z["zdroj"]).name if z.get("zdroj") else "?"
+        chybi = "" if (not z.get("zdroj") or Path(z["zdroj"]).exists()) else T("dlg_zdroj_chybi")
+        self.popis.config(text=f"{T('dlg_zdroj')}: {zdroj}   ·   {z['cesta'].parent}{chybi}")
+
+    def _potvrd(self):
+        vyber = self.box.curselection()
+        if vyber:
+            self.vybrany = self._zaznamy[vyber[0]]
+        self.destroy()
+
+    def _zrus(self):
+        self.vybrany = None
+        self.destroy()
+
 
 class Aplikace(tk.Tk):
 
@@ -2185,6 +2317,10 @@ class Aplikace(tk.Tk):
         self.btn_start = ttk.Button(ovladani, text=T("btn_start"),
                                     command=self.spust_prevod, style="Akce.TButton")
         self.btn_start.pack(side="left")
+        self.btn_navazat = ttk.Button(ovladani, text=T("btn_navazat"),
+                                      command=self.pokracuj_v_rozdelanem,
+                                      style="Tichy.TButton")
+        self.btn_navazat.pack(side="left", padx=(10, 0))
         self.btn_pauza = ttk.Button(ovladani, text=T("btn_pauza"), command=self.prepni_pauzu,
                                     style="Tichy.TButton", state="disabled")
         self.btn_pauza.pack(side="left", padx=(10, 0))
@@ -2511,6 +2647,7 @@ class Aplikace(tk.Tk):
         # Běžící převod musí po přestavbě zůstat v odpovídajícím stavu
         if self.bezi:
             self.btn_start.config(state="disabled")
+            self.btn_navazat.config(state="disabled")
             self.btn_test.config(state="disabled")
             self.btn_pauza.config(state="normal")
             self.btn_stop.config(state="normal")
@@ -2815,7 +2952,84 @@ class Aplikace(tk.Tk):
             "pracovniku": int(self.var_pracovniku.get()),
         }
 
-    def spust_prevod(self):
+    def pokracuj_v_rozdelanem(self):
+        """Nabídne seznam přerušených převodů a v tom vybraném pokračuje."""
+        if self.bezi:
+            return
+
+        slozky = [Path(self.var_vystup_slozka.get().strip('" ') or (APP_DIR / "vystup")),
+                  APP_DIR / "vystup"]
+        zaznamy = najdi_rozdelane(slozky)
+        if not zaznamy:
+            messagebox.showinfo(T("dlg_zadne_rozdelane"), T("dlg_zadne_rozdelane_text"))
+            return
+
+        dialog = DialogRozdelane(self, zaznamy, self.font_rodina)
+        self.wait_window(dialog)
+        vybrany = dialog.vybrany
+        if vybrany is None:
+            return
+
+        zdroj = vybrany.get("zdroj") or ""
+        if not zdroj or not Path(zdroj).exists():
+            messagebox.showerror(T("dlg_chyba"), T("dlg_zdroj_pryc", zdroj or "?"))
+            return
+
+        # Obnovit nastavení z doby přerušení - jinak by otisk nesouhlasil
+        # a navázat by nešlo.
+        obnoveno = self._obnov_nastaveni(vybrany.get("parametry") or {})
+        self.var_vstup.set(zdroj)
+        self.var_vystup_slozka.set(str(vybrany["cesta"].parent))
+        self.var_vystup_nazev.set(vybrany["nazev"])
+        if obnoveno:
+            self.log(T("log_obnoveno", ", ".join(obnoveno)))
+
+        self.nacti_a_priprav()
+        if not self.bloky:
+            return
+        self.spust_prevod(automaticky_navazat=True)
+
+    def _obnov_nastaveni(self, parametry: dict) -> list:
+        """Vrátí do polí hodnoty, se kterými se generovalo. Vypíše, co se změnilo."""
+        mapovani = [
+            ("referencni_wav", self.var_ref_wav, str),
+            ("exaggeration", self.var_exag, float),
+            ("cfg_weight", self.var_cfg, float),
+            ("temperature", self.var_temp, float),
+            ("min_p", self.var_min_p, float),
+            ("seed", self.var_seed, int),
+            ("pauza_ms", self.var_pauza, int),
+            ("max_znaku", self.var_max_znaku, int),
+            ("format", self.var_format, str),
+            ("bitrate", self.var_bitrate, str),
+            ("odstranit_lupance", self.var_lupance, bool),
+            ("obalka", self.var_obalka, bool),
+        ]
+        zmeneno = []
+        for klic, promenna, typ in mapovani:
+            if klic not in parametry:
+                continue
+            try:
+                nova = typ(parametry[klic])
+                if promenna.get() != nova:
+                    promenna.set(nova)
+                    zmeneno.append(klic)
+            except Exception:
+                continue
+
+        klic_jazyka = parametry.get("jazyk_textu")
+        if klic_jazyka:
+            nazev = self._nazev_jazyka_textu(klic_jazyka)
+            if self.var_jazyk_textu.get() != nazev:
+                self.var_jazyk_textu.set(nazev)
+                zmeneno.append("jazyk_textu")
+            self._popis_jazyka()
+
+        self._aktualizuj_popisky_posuvniku()
+        return zmeneno
+
+
+    def spust_prevod(self, automaticky_navazat: bool = False):
         if self.bezi:
             return
         if not self.bloky:
@@ -2835,12 +3049,16 @@ class Aplikace(tk.Tk):
             parametry["format"] = "WAV"
         parametry["otisk"] = otisk_zadani(Path(self.var_vstup.get().strip('" ')),
                                           parametry, len(self.bloky))
+        parametry["zdroj"] = self.var_vstup.get().strip('" ')
+        parametry["ulozitelne"] = {k: v for k, v in parametry.items()
+                                   if k not in ("otisk", "ulozitelne")}
+        parametry["ulozitelne"]["max_znaku"] = int(self.var_max_znaku.get())
 
         # --- navázat na přerušený běh? ---
         postup = Postup.nacti(slozka / (nazev + ".progress.json"))
         od_bloku = 0
         if postup.sedi(parametry["otisk"]) and 0 < postup.hotovo_bloku < len(self.bloky):
-            odpoved = messagebox.askyesnocancel(
+            odpoved = True if automaticky_navazat else messagebox.askyesnocancel(
                 T("dlg_navazat"),
                 T("dlg_navazat_text", postup.hotovo_bloku, len(self.bloky),
                   100.0 * postup.hotovo_bloku / len(self.bloky)))
@@ -2876,6 +3094,7 @@ class Aplikace(tk.Tk):
         self.stop_event.clear()
         self.pause_event.clear()
         self.btn_start.config(state="disabled")
+        self.btn_navazat.config(state="disabled")
         self.btn_test.config(state="disabled")
         self.btn_pauza.config(state="normal", text=T("btn_pauza"))
         self.btn_stop.config(state="normal")
@@ -3048,7 +3267,9 @@ class Aplikace(tk.Tk):
 
                 if postup is not None:
                     postup.uloz(otisk, index, celkem, hotove, str(self._zapisovac.cesta),
-                                self._zapisovac.pocet_vzorku, aktualni_kap)
+                                self._zapisovac.pocet_vzorku, aktualni_kap,
+                                zdroj=p.get("zdroj", ""), parametry=p.get("ulozitelne", {}),
+                                nazev=zaklad.stem)
 
                 znaku_hotovo += len(blok)
                 uplynulo = time.time() - start
@@ -3196,6 +3417,7 @@ class Aplikace(tk.Tk):
     def _prevod_dokoncen(self, cesta, chyba=None):
         self.bezi = False
         self.btn_start.config(state="normal")
+        self.btn_navazat.config(state="normal")
         self.btn_test.config(state="normal")
         self.btn_pauza.config(state="disabled", text=T("btn_pauza"))
         self.btn_stop.config(state="disabled")
