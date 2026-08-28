@@ -136,6 +136,28 @@ If you want to keep the card free, set *parallel processes* to **1**. That drops
 the speed to 0.91× realtime but leaves the GPU at around 38 %, which is what the
 application did before this feature existed.
 
+### Trimming murmur from block edges
+
+After finishing a sentence the model sometimes keeps going, filling what should
+be a pause with a low murmur lasting seconds. Measured in a real audiobook, one
+such stretch ran **1.17 s at −32 dBFS** where the surrounding speech sat at
+−22 dBFS.
+
+Level alone cannot separate the two — eleven decibels is well within the range
+of a quiet syllable. The spectrum can: speech always carries consonants, so
+10–70 % of its energy sits above 4 kHz, while the murmur measured **3 %**. A
+frame counts as speech only if it is loud enough *and* has those high
+components.
+
+Trimming happens before the first and after the last speech frame, never
+between words, and only when the edge run exceeds 500 ms. A quarter second of
+decay is kept so a vowel ending a sentence survives. The pause is then supplied
+by the application's own inserted silence.
+
+Verified against the recording the problem was reported in: of 1.30 s of real
+murmur, 0.26 s remains. Across eight freshly generated blocks, seven were left
+untouched and none lost an audible sample.
+
 ### Removing clicks from pauses
 
 Audiobookery attenuates short impulses that appear in silent stretches. It is

@@ -55,7 +55,7 @@ APP_NAME = "Audiobookery"
 
 # Znaky, které Windows v názvu souboru nedovolí
 ZAKAZANE_ZNAKY = r'[<>:"/\|?*]'
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 
 VYSLOVNOST_PATH = APP_DIR / "vyslovnost.json"
 
@@ -203,6 +203,7 @@ DEFAULT_CONFIG = {
     # lupance v tichu neubyly a přibylo vynucené ukončování kvůli zacyklení.
     "min_p": 0.05,
     "odstranit_lupance": True,
+    "orezat_okraje": True,
     "seed": 0,
     # Jazyk syntézy je nezávislý na jazyku rozhraní - v českém rozhraní
     # klidně vyrábíte anglickou audioknihu.
@@ -883,7 +884,8 @@ def otisk_zadani(cesta_knihy: Path, p: dict, celkem_bloku: int) -> str:
     except Exception:
         h.update(str(cesta_knihy).encode("utf-8"))
     for klic in ("jazyk_textu", "referencni_wav", "exaggeration", "cfg_weight",
-                 "temperature", "min_p", "odstranit_lupance", "seed", "pauza_ms",
+                 "temperature", "min_p", "odstranit_lupance", "orezat_okraje",
+                 "seed", "pauza_ms",
                  "format", "bitrate"):
         h.update(f"{klic}={p.get(klic)}".encode("utf-8"))
     h.update(f"bloku={celkem_bloku}".encode("utf-8"))
@@ -1693,6 +1695,81 @@ def odstran_lupance(vzorky, sr: int, zapnuto: bool = True):
         return d, 0
     return (d * zisk).astype("float32"), ztlumeno
 
+def orizni_okraje(vzorky, sr: int, zapnuto: bool = True):
+    """Odřízne tiché brblání před první a za poslední skutečnou řečí v bloku.
+
+    Model po dořečení věty občas nepřestane a několik sekund tiše hučí.
+    Samotnou hlasitostí to od řeči odlišit nejde - naměřeno -33 dBFS proti
+    -22 dBFS u řeči, a tichá slabika se do těch jedenácti decibelů vejde.
+
+    Rozliší to ale spektrum: řeč má vždycky souhlásky, tedy energii nad
+    4 kHz (naměřeno 10 az 70 %), kdežto to hučení je skoro čistě nízké
+    (3 %). Za řeč se proto považuje rámec, který je dost hlasitý *a zároveň*
+    má vysoké složky.
+
+    Řeže se jen před prvním a za posledním takovým rámcem, a jen když je
+    okrajový úsek delší než 400 ms - aby doznívající samohláska na konci
+    věty přežila. Ticho pak dodá pauza, kterou vkládá aplikace sama.
+
+    Vrací (vzorky, odriznuto_sekund).
+    """
+    import numpy as np
+
+    d = np.asarray(vzorky, dtype="float32").reshape(-1)
+    if not zapnuto or len(d) < int(sr * 0.5):
+        return d, 0.0
+
+    krok = max(1, int(sr * 0.01))          # 10 ms
+    delka_okna = max(krok * 2, int(sr * 0.025))
+    pocet = max(1, (len(d) - delka_okna) // krok + 1)
+    if pocet < 10:
+        return d, 0.0
+
+    okno_fce = np.hanning(delka_okna)
+    frekvence = np.fft.rfftfreq(delka_okna, 1.0 / sr)
+    vysoke = frekvence > 4000.0
+
+    energie = np.zeros(pocet)
+    podil_vys = np.zeros(pocet)
+    for i in range(pocet):
+        kus = d[i * krok:i * krok + delka_okna].astype("float64")
+        if len(kus) < delka_okna:
+            break
+        energie[i] = np.sqrt((kus ** 2).mean())
+        spek = np.abs(np.fft.rfft(kus * okno_fce))
+        celkem = spek.sum()
+        podil_vys[i] = (spek[vysoke].sum() / celkem) if celkem > 0 else 0.0
+
+    uroven = float(np.percentile(energie, 90))
+    if uroven <= 0:
+        return d, 0.0
+
+    # řeč = dost hlasitá a se souhláskami
+    je_rec = (energie > uroven * 0.10) & (podil_vys > 0.08)
+    kde = np.flatnonzero(je_rec)
+    if not len(kde):
+        return d, 0.0
+
+    prvni, posledni = int(kde[0]), int(kde[-1])
+    # Řeže se až od půl sekundy okrajového ticha a doznívání se nechává
+    # čtvrt vteřiny - měření ukázalo, že kratší doběh ukousne konec
+    # samohlásky na konci věty.
+    min_orez = int(0.5 / 0.01)             # 500 ms v rámcích
+    doben = int(sr * 0.25)
+
+    zacatek = 0
+    if prvni > min_orez:
+        zacatek = max(0, prvni * krok - int(sr * 0.05))
+    konec = len(d)
+    if (pocet - 1 - posledni) > min_orez:
+        konec = min(len(d), posledni * krok + delka_okna + doben)
+
+    if zacatek <= 0 and konec >= len(d):
+        return d, 0.0
+    orez = (len(d) - (konec - zacatek)) / float(sr)
+    return d[zacatek:konec].copy(), orez
+
+
 def generuj_blok(engine, blok: str, p: dict, index: int, celkem: int, log) -> object:
     """Vygeneruje blok; hlídá halucinační smyčky a při chybě to zkusí znovu.
 
@@ -1717,6 +1794,10 @@ def generuj_blok(engine, blok: str, p: dict, index: int, celkem: int, log) -> ob
                 log(T("log_prazdny", index, celkem))
                 continue
 
+            vzorky, orez = orizni_okraje(vzorky, engine.sr,
+                                         p.get("orezat_okraje", True))
+            if orez > 0.3:
+                log(T("log_orez", orez, index, celkem))
             vzorky, ztlumeno = odstran_lupance(vzorky, engine.sr,
                                                p.get("odstranit_lupance", True))
             if ztlumeno:
@@ -2016,6 +2097,7 @@ class Aplikace(tk.Tk):
             "temperature": float(self.var_temp.get()),
             "min_p": float(self.var_min_p.get()),
             "odstranit_lupance": bool(self.var_lupance.get()),
+            "orezat_okraje": bool(self.var_orez.get()),
             "seed": int(self.var_seed.get() or 0),
             "jazyk_textu": self._klic_jazyka_textu(),
             "zarizeni": self.var_zarizeni.get(),
@@ -2093,6 +2175,7 @@ class Aplikace(tk.Tk):
         self.var_temp = tk.DoubleVar(value=c["temperature"])
         self.var_min_p = tk.DoubleVar(value=c["min_p"])
         self.var_lupance = tk.BooleanVar(value=c["odstranit_lupance"])
+        self.var_orez = tk.BooleanVar(value=c["orezat_okraje"])
         self.var_seed = tk.IntVar(value=c["seed"])
         self.var_jazyk_textu = tk.StringVar(value=self._nazev_jazyka_textu(c["jazyk_textu"]))
         self.var_zarizeni = tk.StringVar(value=c["zarizeni"])
@@ -2304,11 +2387,13 @@ class Aplikace(tk.Tk):
         ch2.pack(side="left", padx=(28, 0))
         ch3 = ttk.Checkbutton(spodek, text=T("lab_lupance"), variable=self.var_lupance)
         ch3.pack(side="left", padx=(28, 0))
+        ch4 = ttk.Checkbutton(spodek, text=T("lab_orez"), variable=self.var_orez)
+        ch4.pack(side="left", padx=(28, 0))
         ttk.Label(spodek, text=T("lab_pracovniku")).pack(side="left", padx=(28, 12))
         sp_w = ttk.Spinbox(spodek, from_=0, to=4, increment=1,
                            textvariable=self.var_pracovniku, width=5)
         sp_w.pack(side="left")
-        self._zamknout(cb, ch2, ch3, sp_w)
+        self._zamknout(cb, ch2, ch3, ch4, sp_w)
 
         # ---------------- Ovládání ----------------
         ovladani = ttk.Frame(hlavni)
