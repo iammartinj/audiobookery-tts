@@ -303,7 +303,7 @@ with a different pronunciation.
 ### A Czech dictionary from Wiktionary
 
 For Czech books Audiobookery also applies
-[`vyslovnost_cs.json`](vyslovnost_cs.json): 33,118 word forms that get a háček
+[`vyslovnost_cs.json`](vyslovnost_cs.json): 53,330 word forms that get a háček
 where the soft reading is confirmed. It comes from Wikislovník, the Czech
 Wiktionary, which gives the pronunciation of its entries in IPA — and IPA does
 tell the two readings apart: *tichý* [cɪxiː], *politika* [pɔlɪtɪka].
@@ -316,20 +316,44 @@ the part of the word they share with it; reflexive verbs and forms negated with
 The IPA turned out not to be equally reliable everywhere. Entries with a native
 speaker's recording are right, while rare entries without one are often
 transcribed naively from the spelling, loanwords included — *anestetický*
-[anɛstɛcɪtskiː]. Entries with a recording are therefore trusted fully; without
-one, only a soft ending is accepted, where grammar decides the reading
-(*poslední, spojení, ním, posadil*).
+[anɛstɛcɪtskiː]. Entries with a recording are therefore trusted fully. Without
+one, a soft ending is accepted, where grammar decides the reading (*poslední,
+spojení, ním, posadil*), and a soft stem only when the word does not look
+borrowed.
+
+Whether a word looks borrowed is learned from Wikislovník itself. A hard
+*ti/di/ni* written into the IPA is deliberate, so those 2,547 words are
+loanwords (*politika, diplom, titul*); soft ones confirmed by a recording are
+native. More native examples come from letter patterns that loanwords
+practically never have. Each pattern is first checked against the 2,547
+loanwords and kept only if it occurs in at most two of them: *-ník, -ština*,
+numerals such as *deseti-*, *proti-*, *-tivý*, and *tiš-, nij-, nič-* at the
+start of a word. Patterns that failed stayed out — *ř* and *ů* (*diář*), *nič*
+inside a word (*botanička*), *-tivá* in noun cases (*lokomotivám*). A naive Bayes
+classifier on letter groups then scores the uncertain words, with a threshold set
+by five-fold cross-validation so that no more than 1 % of loanwords would pass as
+native (measured: 0.94 %). Pronouns, conjunctions and numerals are accepted
+without it; loanwords among them are negligible (*aniž, nikomu, totiž*).
 
 | variant | forms | háček inside a loanword | coverage of a Czech novel |
 |---|---|---|---|
 | every entry | 62,455 | about 1,400 | 73 % |
 | entries with a recording only | 4,262 | 0 | 34 % |
-| **mixed — shipped** | **33,118** | **0** | **63 %** |
+| recording, or a soft ending (1.8) | 33,118 | 0 | 63 % |
+| **+ loanword detector — shipped** | **53,330** | **none found** | **71 %** |
+
+"None found" rests on a check of the 20,212 forms the detector adds. 598 of
+them put the háček before a letter group typical of loanwords (*-iv-, -ism-,
+-ist-, -ick-, -iz-, -iál-*); most are numerals (*desetistěnka*), *-tivý*
+adjectives and the *divný* family, and the remaining 158 were read one by one —
+all native, such as *protivník, protizákonný, tětiva, nizozemština*. The
+0.94 % is measured on loanwords that Wikislovník marks hard; one with naive
+IPA may behave a little differently, so read it as an estimate, not a guarantee.
 
 Coverage is the share of words containing *ti/di/ni* that get rewritten; the
-remainder includes names and loanwords that should stay hard. Native words with a
-soft stem and no recording — *tiše, podíval, nikomu* — are not covered. If you
-hear one go wrong, add it to `vyslovnost.json`; your own rules run first and win.
+remainder includes names and loanwords that should stay hard. Some native words
+are still missed — *okolností, rameni, místnosti* — so if you hear one go wrong,
+add it to `vyslovnost.json`; your own rules run first and win.
 
 Compared by ear on the same sentences, the rewritten text read better. A háček
 does not change the length of a word, so block boundaries stay exactly where they

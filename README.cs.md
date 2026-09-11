@@ -369,8 +369,10 @@ Za to, co s nástrojem vyrobíte, autoři neodpovídají.
 ## Výslovnost měkkého ti, di, ni
 
 Model občas přečte *tichý* jako *tychý*. U českých knih proto aplikace sama doplní
-háček do 33 118 tvarů slov, u kterých Wikislovník potvrzuje měkkou výslovnost —
+háček do 53 330 tvarů slov, u kterých Wikislovník potvrzuje měkkou výslovnost —
 *ťichý, ďivadlo, ňikdo* — a přejatá slova jako *politika* nebo *diplom* nechá být.
+U slov, která ve Wikislovníku nemají nahrávku, o přejatosti rozhoduje jednoduchý
+klasifikátor naučený na datech Wikislovníku.
 Slovník je v `vyslovnost_cs.json` a vyrábí ho `vyslovnost_wiki.py`; podrobnosti
 a měření jsou v anglickém README.
 
