@@ -1340,6 +1340,39 @@ def rychly_dekoder_stazeny() -> bool:
     return slozka.is_dir() and any(slozka.rglob(RYCHLY_DEKODER_SOUBOR))
 
 
+def uvolni_hooky_t3(model) -> int:
+    """Zahodí forward hooky, které po sobě chatterbox na T3 nechává.
+
+    T3.inference() si těsně před 'if not self.compiled' nastaví
+    self.compiled = False, takže při každém volání vyrobí nový
+    AlignmentStreamAnalyzer. Ten si na tři sledované attention vrstvy
+    zaregistruje forward hook a handle nikam neuloží - odregistrovat se tedy
+    nemá čím. Hooky se hromadí po třech na blok a každý v každém kroku
+    kopíruje attention. Naměřeno na 2080 Ti, 60 stejných bloků: bez úklidu
+    posledních deset o 11 % pomalejších než prvních deset, s úklidem žádné
+    zpomalení.
+
+    Uklízí se před generováním, nikdy během něj - nový analyzátor si svůj
+    hook zaregistruje sám.
+    """
+    try:
+        from chatterbox.models.t3.inference.alignment_stream_analyzer import (
+            LLAMA_ALIGNED_HEADS)
+    except ImportError:
+        # Jiná verze balíku, která analyzátor nemá - není co uklízet
+        return 0
+
+    vrstvy = getattr(getattr(getattr(model, "t3", None), "tfmr", None), "layers", None)
+    if vrstvy is None:
+        return 0
+    uklizeno = 0
+    for index, _hlava in LLAMA_ALIGNED_HEADS:
+        hooky = vrstvy[index].self_attn._forward_hooks
+        uklizeno += len(hooky)
+        hooky.clear()
+    return uklizeno
+
+
 class TtsEngine:
     def __init__(self, log_fn):
         self.log = log_fn
@@ -1351,6 +1384,8 @@ class TtsEngine:
         self.nacteny_repo = None
         self.jazyk = None
         self.rychly_dekoder = False
+        self._hlas_klic = None        # pro který referenční hlas jsou podmínky připravené
+        self._vychozi_conds = None    # výchozí hlas modelu z conds.pt
 
     # ------------------------------------------------------------------
     @contextlib.contextmanager
@@ -1438,6 +1473,9 @@ class TtsEngine:
         with self._hlaseni_stahovani(T("log_zaklad_model")):
             self.model = mtl_tts.ChatterboxMultilingualTTS.from_pretrained(device=self.zarizeni)
         self.sr = int(getattr(self.model, "sr", 24000))
+        # Výchozí hlas si odložit - prepare_conditionals() ho přepíše referenčním
+        self._vychozi_conds = getattr(self.model, "conds", None)
+        self._hlas_klic = None
         self.log(T("log_nacten", self.sr))
 
         if pozadovany_repo:
@@ -1623,8 +1661,9 @@ class TtsEngine:
             temperature=float(temperature),
             min_p=float(min_p),
         )
-        if referencni_wav and Path(referencni_wav).exists():
-            argumenty["audio_prompt_path"] = referencni_wav
+        # Obojí musí proběhnout před generate() - důvody jsou u obou funkcí
+        uvolni_hooky_t3(self.model)
+        self._priprav_hlas(referencni_wav, exaggeration)
 
         kod = (self.jazyk or {}).get("kod", "en")
         if self.podporuje_jazyk:
@@ -1644,12 +1683,43 @@ class TtsEngine:
         return wav
 
     # ------------------------------------------------------------------
+    def _priprav_hlas(self, referencni_wav: str, exaggeration: float):
+        """Zakóduje referenční hlas jednou, ne znovu u každého bloku.
+
+        Chatterbox při každém generate() s audio_prompt_path znovu načte WAV
+        z disku a prožene ho třemi enkodéry - a to ještě před inference_mode,
+        takže si podmínky nesou i graf pro zpětný průchod. Připravené jednou
+        pod no_grad ušetří tu práci a na 2080 Ti 280 MB VRAM na proces.
+
+        Expresivitu do klíče dávat nemusíme: generate() si ji v podmínkách
+        přepíše sám, když se liší.
+        """
+        import torch
+
+        if not (referencni_wav and Path(referencni_wav).exists()):
+            # Bez reference se čte výchozím hlasem modelu. Po bloku s referencí
+            # by na modelu jinak zůstal cizí hlas.
+            if self._hlas_klic is not None:
+                self.model.conds = self._vychozi_conds
+                self._hlas_klic = None
+            return
+
+        klic = (str(referencni_wav), Path(referencni_wav).stat().st_mtime_ns)
+        if klic == self._hlas_klic:
+            return
+        with torch.no_grad():
+            self.model.prepare_conditionals(referencni_wav, exaggeration=float(exaggeration))
+        self._hlas_klic = klic
+
+    # ------------------------------------------------------------------
     def uvolni(self):
         self.model = None
         self.finetune_nacten = False
         self.nacteny_repo = None
         self.podporuje_jazyk = True
         self.rychly_dekoder = False
+        self._hlas_klic = None
+        self._vychozi_conds = None
         try:
             import torch, gc
             gc.collect()
