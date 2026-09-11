@@ -19,6 +19,7 @@ licence travels with it. Audiobookery loads it for its own process only, via
 |---|---|---|
 | [Chatterbox TTS](https://github.com/resemble-ai/chatterbox) | MIT | the synthesis engine, installed via pip |
 | [`ResembleAI/chatterbox`](https://huggingface.co/ResembleAI/chatterbox) | see model card | base weights, ~3 GB |
+| [`ResembleAI/chatterbox-turbo`](https://huggingface.co/ResembleAI/chatterbox-turbo) | MIT | distilled decoder `s3gen_meanflow.safetensors`, ~1.1 GB, only when *fast decoder* is on |
 | [`Thomcles/Chatterbox-TTS-Czech`](https://huggingface.co/Thomcles/Chatterbox-TTS-Czech) | see model card | Czech checkpoint, access-gated |
 | [`pekiskol/chatterbox-tts-slovak`](https://huggingface.co/pekiskol/chatterbox-tts-slovak) | see model card | Slovak checkpoint |
 | [`ResembleAI/Chatterbox-Multilingual-pt-br`](https://huggingface.co/ResembleAI/Chatterbox-Multilingual-pt-br) | see model card | Brazilian Portuguese |

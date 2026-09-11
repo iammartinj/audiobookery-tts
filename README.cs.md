@@ -170,6 +170,7 @@ nahrávky — bývá tam znělka nebo ohlášení titulu jiným hlasem.
 | Pauza mezi bloky | 250 ms | Ticho vkládané mezi bloky. |
 | Seed | 0 | 0 = náhodný. Nenulová hodnota dělá výsledek reprodukovatelný. |
 | Zařízení | auto | `auto` zvolí CUDA, pokud je dostupná. |
+| Rychlý dekodér | vypnuto | Destilovaný dekodér z Chatterbox Turbo. Na 2080 Ti převod zrychlí zhruba o 11 %, zvuk zůstává obdobný. Při prvním zapnutí stáhne 1,1 GB. |
 
 ## Jazyk knihy a katalog modelů
 
@@ -372,9 +373,15 @@ Za to, co s nástrojem vyrobíte, autoři neodpovídají.
 | Audiobookery | MIT | tento repozitář |
 | [Chatterbox TTS](https://github.com/resemble-ai/chatterbox) | MIT | vlastní engine |
 | [`ResembleAI/chatterbox`](https://huggingface.co/ResembleAI/chatterbox) | viz karta modelu | základní váhy, stahují se za běhu |
+| [`ResembleAI/chatterbox-turbo`](https://huggingface.co/ResembleAI/chatterbox-turbo) | MIT | rychlý dekodér, stahuje se jen po zapnutí |
 | Jazykové checkpointy | viz karta každého modelu | komunitní práce, podmínky se liší |
 | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | OFL 1.1 | přibalené ve `fonts/`, viz `fonts/OFL.txt` |
 
 V repozitáři nejsou žádné váhy modelů. Vše se stahuje z Hugging Face při prvním
 použití, za podmínek, které daný model nese.
+
+## Poděkování
+
+[@tomhol](https://github.com/tomhol) za dohledání dvou úniků, kvůli kterým se dlouhé
+převody postupně zpomalovaly, a za tip na destilovaný dekodér.
 

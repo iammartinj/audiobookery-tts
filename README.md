@@ -136,6 +136,54 @@ If you want to keep the card free, set *parallel processes* to **1**. That drops
 the speed to 0.91× realtime but leaves the GPU at around 38 %, which is what the
 application did before this feature existed.
 
+### Fast decoder
+
+The last stage turns speech tokens into audio. Chatterbox Turbo ships a
+distilled version of that decoder, which needs 2 flow steps instead of 10 and
+no separate CFG pass. It is **off by default** because it downloads 1.1 GB the
+first time; switch it on under *advanced settings*.
+
+Measured on an RTX 2080 Ti, eight blocks, 48 s of audio:
+
+| | standard | fast decoder |
+|---|---|---|
+| decoder per block (same tokens, median) | 0.73 s | 0.17 s |
+| decoder share of total time | 12 % | 3 % |
+| whole conversion | 0.98× realtime | 1.09× realtime |
+
+The decoder gets four times faster, but the conversion only about 11 % faster:
+on CUDA 88 % of the time goes into T3, the model that produces the tokens. How
+much you gain depends on how large a share the decoder takes on your hardware.
+
+Only the flow part of the checkpoint differs. The vocoder, speaker encoder and
+speech tokenizer are bit-identical to the multilingual model's, so reference
+voices keep working. The checkpoint comes from an English model, but the
+decoder works on language-neutral speech tokens; compared by ear on Czech, the
+two decoders sounded alike.
+
+Switching it on changes the fingerprint of an unfinished book, so a conversion
+continues only with the setting it was started with.
+
+### Long books no longer slow down
+
+Two leaks in Chatterbox itself, found and measured by
+[@tomhol](https://github.com/tomhol):
+
+- **Forward hooks piled up.** `T3.inference()` resets `self.compiled` just
+  before checking it, so every block builds a new alignment analyzer, and that
+  analyzer registers forward hooks on three attention layers without keeping the
+  handles. Three more hooks per block, each copying attention on every step.
+  Audiobookery now removes them before each block. Over 60 identical blocks, the
+  last ten used to be 11 % slower than the first ten; with the cleanup there is
+  no slowdown.
+- **The reference voice was encoded for every block.** With
+  `audio_prompt_path`, Chatterbox reloads the WAV and runs it through three
+  encoders on each call, outside inference mode, so the result carries an
+  autograd graph. It is now encoded once per voice and reused, which saves that
+  work and 280 MB of VRAM per process.
+
+Neither change alters the audio. With the same seed the output differs from the previous code by at most 2e-6 per sample, which is no more than two runs of the unchanged code differ from each other.
+
 ### Trimming murmur from block edges
 
 After finishing a sentence the model sometimes keeps going, filling what should
@@ -364,6 +412,7 @@ The authors of this tool are not responsible for what you make with it.
 | Audiobookery | MIT | this repository |
 | [Chatterbox TTS](https://github.com/resemble-ai/chatterbox) | MIT | the engine |
 | [`ResembleAI/chatterbox`](https://huggingface.co/ResembleAI/chatterbox) | see model card | base weights, downloaded at runtime |
+| [`ResembleAI/chatterbox-turbo`](https://huggingface.co/ResembleAI/chatterbox-turbo) | MIT | fast decoder, downloaded only when switched on |
 | Language checkpoints | see each model card | community work, terms vary |
 | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | OFL 1.1 | bundled in `fonts/`, see `fonts/OFL.txt` |
 
@@ -417,3 +466,8 @@ temperature to 0.6 also helps.
 Bug reports and language checkpoints for `modely.json` are both welcome. If you
 are adding a model, please say whether you verified it loads and what the log
 reported about unmatched keys.
+
+## Thanks
+
+To [@tomhol](https://github.com/tomhol) for tracking down the two leaks that made
+long conversions slow down, and for pointing out the distilled decoder.
