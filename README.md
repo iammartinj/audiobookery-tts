@@ -389,9 +389,25 @@ The unfinished chapter is truncated to the last recorded sample — so a block c
 in half by a crash is discarded rather than left as a glitch — and generation
 picks up from the next block.
 
-The fingerprint covers the source file and every setting that affects the sound.
-Change the voice, the language or the temperature and resuming is refused, since
-the second half of the book would not match the first.
+**What blocks resuming.** Settings that change the voice — reference recording,
+language, expressiveness, cfg, temperature, min_p, seed, pause, output format and
+bitrate — and the way the text is split into blocks. Otherwise the second half of
+the book would not match the first, or a shifted block boundary would repeat or
+skip a piece of text. Corrections do not block it: the click filter, edge
+trimming, the fast decoder and the pronunciation dictionaries only make the rest
+of the book better, so a changed correction is noted in the log and the
+conversion carries on. A háček from the Czech dictionary does not change the
+length of a word, so it never moves a block boundary.
+
+If resuming is not possible, Audiobookery says what changed and asks before
+starting over — nothing is deleted without that answer. Starting a book whose
+chapter folder already holds files asks before overwriting them as well.
+
+**Passages that fail.** A block the model cannot generate in three attempts is
+split into shorter parts, which are tried one by one and put back in the same
+place. Only what fails even then is left out, and every such passage is listed
+with its block and chapter in `<book> - missing text.txt` next to the output
+(`<book> - chybějící text.txt` with the Czech interface).
 
 ## Languages
 
@@ -492,6 +508,7 @@ audiobookery/
   vyslovnost.json      # your pronunciation rewrites
   vyslovnost_cs.json   # soft ti/di/ni for Czech, from Wiktionary (CC BY-SA 4.0)
   vyslovnost_wiki.py   # regenerates vyslovnost_cs.json
+  tests/               # unit tests, no GPU or model needed
   run.bat              # install + launch
   requirements.txt
   fonts/               # bundled JetBrains Mono (OFL 1.1)
@@ -531,7 +548,15 @@ Bug reports and language checkpoints for `modely.json` are both welcome. If you
 are adding a model, please say whether you verified it loads and what the log
 reported about unmatched keys.
 
+The tests need neither a GPU nor a model and finish in seconds. Run them from the
+application folder before sending a change:
+
+```bat
+.venv\Scripts\python -m unittest discover -s tests
+```
+
 ## Thanks
 
 To [@tomhol](https://github.com/tomhol) for tracking down the two leaks that made
-long conversions slow down, and for pointing out the distilled decoder.
+long conversions slow down, for pointing out the distilled decoder, and for the
+chapter progress bar, remembered sections and a window that fits smaller screens.

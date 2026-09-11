@@ -124,6 +124,7 @@ TEXTY = {
                          "{0}  |  {1} znaků  |  {2} bloků  |  odhad délky audia ~{3}"),
     "prubeh_bloky":     ("{0}/{1}", "{0}/{1}"),
     "prubeh_cas":       ("elapsed {0}  /  left {1}", "uplynulo {0}  /  zbývá {1}"),
+    "prubeh_kapitola":  ("chapter {0}/{1} · block {2}/{3}", "kapitola {0}/{1} · blok {2}/{3}"),
     "vizu_ticho":       ("silent", "ticho"),
 
     # ---------------- Poslech ----------------
@@ -275,6 +276,14 @@ TEXTY = {
     "log_pokus":        ("Block {0}/{1} - attempt {2} failed: {3}",
                          "Blok {0}/{1} - pokus {2} selhal: {3}"),
     "log_preskocen":    ("Block {0}/{1} SKIPPED: {2}...", "Blok {0}/{1} PŘESKOČEN: {2}..."),
+    "log_rozdeleno":    ("Block {0}/{1} kept failing - trying it in {2} shorter parts.",
+                         "Blok {0}/{1} opakovaně selhal - zkouším ho po {2} kratších částech."),
+    "log_chybejici":    ("WARNING: {0} passage(s) could not be generated and are missing from the audiobook. List: {1}",
+                         "VAROVÁNÍ: {0} úsek(ů) se nepodařilo vygenerovat a v audioknize chybí. Seznam: {1}"),
+    "soubor_chybejici": (" - missing text.txt", " - chybějící text.txt"),
+    "chybejici_hlavicka": ("These passages could not be generated and are missing from the audiobook.",
+                           "Tyto úseky se nepodařilo vygenerovat a v audioknize chybí."),
+    "chybejici_radek":  ("block {0}, chapter {1}: {2}", "blok {0}, kapitola {1}: {2}"),
     "log_pokracuji":    ("Resuming...", "Pokračuji..."),
     "log_pozastaveno":  ("Paused. Playback keeps draining the buffer, generating is halted.",
                          "Pozastaveno. Přehrávání dobírá zásobu, generování stojí."),
@@ -309,6 +318,21 @@ TEXTY = {
     "log_navazuji":     ("Resuming at block {0} of {1}.", "Navazuji od bloku {0} z {1}."),
     "log_navazuji_soubor": ("Continuing file {0}, already {1} of audio.",
                             "Navazuji na soubor {0}, zatím {1} audia."),
+    "log_navazuji_zmeny": ("Resuming with changed corrections: {0}.",
+                           "Navazuji se změněnými opravami: {0}."),
+    "dlg_nelze_navazat": ("Cannot resume", "Nelze navázat"),
+    "dlg_nelze_navazat_text": ("This book was interrupted at block {0} of {1}, but it cannot be resumed "
+                               "because this changed: {2}.\n\nStart over? Files already generated "
+                               "for this book will be overwritten.\n\nNo - leave everything as it is.",
+                               "Tato kniha byla přerušena na bloku {0} z {1}, ale navázat nejde, "
+                               "protože se změnilo: {2}.\n\nZačít znovu? Už vygenerované soubory "
+                               "této knihy se přepíšou.\n\nNe - nechat všechno, jak je."),
+    "duvod_neznamy":    ("the book text, its split into blocks or the reference recording",
+                         "text knihy, jeho rozdělení na bloky nebo referenční nahrávka"),
+    "nazev_hlas":       ("reference voice", "referenční hlas"),
+    "nazev_format":     ("output format", "formát výstupu"),
+    "nazev_bitrate":    ("MP3 bitrate", "datový tok MP3"),
+    "nazev_slovnik":    ("pronunciation dictionary", "slovníček výslovnosti"),
     "log_lze_navazat":  ("Progress saved - you can resume this book later.",
                          "Postup uložen - v knize lze později pokračovat."),
     "log_postup_neplatny": ("A saved progress file exists but the book or settings changed, "

@@ -136,9 +136,9 @@ def _velikost_jako(vzor: str, novy: str) -> str:
 def uprav_vyslovnost(text: str, jazyk: str = ""):
     """Přepíše text podle slovníčků. Vrací (text, ručních_náhrad, slov_z_Wikislovníku).
 
-    Nejdřív ruční pravidla z vyslovnost.json - ta mají přednost. U české
-    knihy pak háčky z Wikislovníku. Slovo, které už přepsalo ruční pravidlo,
-    ve Wikislovníku nenajde, takže se nic neuplatní dvakrát.
+    Nejdřív ruční pravidla z vyslovnost.json, u české knihy pak háčky
+    z Wikislovníku. Ruční pravidlo tak může slovník přebít - 'tichý' přepsané
+    na 'tychý' ve slovníku nenajde nic, co by ho vrátilo.
     """
     if not text:
         return text, 0, 0
@@ -252,6 +252,8 @@ DEFAULT_CONFIG = {
     "odstranit_lupance": True,
     "orezat_okraje": True,
     "rychly_dekoder": False,
+    # Sbalené sekce okna - na nízkém monitoru se bez toho nevejde spodek
+    "sbalene_sekce": {"poslech": False, "pokrocile": True, "prubeh": False},
     "seed": 0,
     # Jazyk syntézy je nezávislý na jazyku rozhraní - v českém rozhraní
     # klidně vyrábíte anglickou audioknihu.
@@ -918,14 +920,49 @@ class WavZapisovacRaw:
             pass
 
 
-def otisk_zadani(cesta_knihy: Path, p: dict, celkem_bloku: int) -> str:
-    """Otisk zdroje a všeho, co ovlivňuje zvuk.
+# Nastavení, bez kterých by druhá půlka knihy zněla jinak než první. Když se
+# změní, navazovat nejde.
+NASTAVENI_HLASU = ("jazyk_textu", "referencni_wav", "exaggeration", "cfg_weight",
+                   "temperature", "min_p", "seed", "pauza_ms", "format", "bitrate")
+# Opravy. Změna jen zlepší zbytek knihy, takže navázání neblokuje - do logu
+# se ale vypíše. Ke slovníčkům se do stavu přidává i otisk jejich obsahu.
+NASTAVENI_OPRAV = ("odstranit_lupance", "orezat_okraje", "rychly_dekoder")
 
-    Když se změní kterákoli položka, navazovat na starý výstup nedává smysl -
-    druhá polovina knihy by zněla jinak než první.
+
+def otisk_hlasu(cesta_knihy: Path, p: dict, bloky) -> str:
+    """Otisk zdroje, nastavení hlasu a rozdělení textu na bloky.
+
+    Délky bloků jsou v otisku, aby navázání nikdy nesedlo na posunuté hranice -
+    kus textu by se jinak přeskočil nebo zopakoval. Háček ze slovníčku délku
+    slova nemění, takže opravy výslovnosti navázání nezablokují. Ruční
+    pravidlo, které slovo prodlouží, ano.
     """
     import hashlib
 
+    h = hashlib.sha256()
+    try:
+        h.update(Path(cesta_knihy).read_bytes())
+    except Exception:
+        h.update(str(cesta_knihy).encode("utf-8"))
+    for klic in NASTAVENI_HLASU:
+        h.update(f"{klic}={p.get(klic)}".encode("utf-8"))
+    ref = p.get("referencni_wav")
+    if ref and Path(ref).exists():
+        h.update(str(Path(ref).stat().st_mtime_ns).encode("utf-8"))
+    h.update(("bloky=" + ",".join(str(len(b)) for b in bloky)).encode("utf-8"))
+    return h.hexdigest()[:32]
+
+
+def otisk_verze_1(cesta_knihy: Path, p: dict, celkem_bloku: int) -> str:
+    """Otisk, jak ho počítala verze 1.9 - jen kvůli knihám rozdělaným v ní.
+
+    Tehdejší otisk zahrnoval i opravy, takže sedí jen při stejném slovníčku
+    a filtrech. Ořez okrajů se do převodu tehdy neposílal vůbec, proto se tu
+    počítá, jako by chyběl.
+    """
+    import hashlib
+
+    stare = {k: v for k, v in p.items() if k != "orezat_okraje"}
     h = hashlib.sha256()
     try:
         h.update(Path(cesta_knihy).read_bytes())
@@ -935,19 +972,42 @@ def otisk_zadani(cesta_knihy: Path, p: dict, celkem_bloku: int) -> str:
                  "temperature", "min_p", "odstranit_lupance", "orezat_okraje",
                  "seed", "pauza_ms",
                  "format", "bitrate"):
-        h.update(f"{klic}={p.get(klic)}".encode("utf-8"))
-    # Rychlý dekodér jen když je zapnutý. Vypnutý dává stejný otisk jako
-    # verze, která tuhle volbu ještě neměla, takže rozdělané knihy navážou.
-    if p.get("rychly_dekoder"):
+        h.update(f"{klic}={stare.get(klic)}".encode("utf-8"))
+    if stare.get("rychly_dekoder"):
         h.update(b"rychly_dekoder=True")
     h.update(f"bloku={celkem_bloku}".encode("utf-8"))
-    # Klíč jazyka je "kod" nebo "kod|repo"
-    kod = (p.get("jazyk_textu") or "").split("|")[0]
+    kod = (stare.get("jazyk_textu") or "").split("|")[0]
     h.update(otisk_vyslovnosti(kod).encode("utf-8"))
-    ref = p.get("referencni_wav")
+    ref = stare.get("referencni_wav")
     if ref and Path(ref).exists():
         h.update(str(Path(ref).stat().st_mtime_ns).encode("utf-8"))
     return h.hexdigest()[:32]
+
+
+def posud_navazani(data: dict, zadani: dict):
+    """Jde na uložený postup navázat? Vrací (jde, změněná nastavení).
+
+    'zadani' nese otisk_hlasu, otisk_verze_1, opravy a ulozitelne parametry.
+    Když navázat jde, seznam obsahuje opravy změněné od přerušení. Když ne,
+    obsahuje změněná nastavení hlasu - prázdný seznam pak znamená, že se
+    změnil text knihy, jeho rozdělení na bloky nebo soubor s nahrávkou hlasu.
+    """
+    if not data:
+        return False, []
+    verze = data.get("verze")
+    if verze == 2:
+        jde = data.get("otisk_hlasu") == zadani["otisk_hlasu"]
+    elif verze == 1:
+        jde = data.get("otisk") == zadani["otisk_verze_1"]
+    else:
+        jde = False
+    if jde:
+        drive = data.get("opravy") or {}
+        return True, [k for k, v in zadani["opravy"].items() if k in drive and drive[k] != v]
+    ulozene = data.get("parametry") or {}
+    ted = zadani["ulozitelne"]
+    return False, [k for k in NASTAVENI_HLASU + ("max_znaku",)
+                   if k in ulozene and ulozene[k] != ted.get(k)]
 
 
 def najdi_rozdelane(slozky) -> list:
@@ -1000,24 +1060,28 @@ class Postup:
             p.data = {}
         return p
 
-    def sedi(self, otisk: str) -> bool:
-        return bool(self.data) and self.data.get("otisk") == otisk and self.data.get("verze") == 1
-
     @property
     def hotovo_bloku(self) -> int:
         return int(self.data.get("hotovo_bloku", 0))
 
-    def uloz(self, otisk: str, hotovo: int, celkem: int, soubory: list,
+    @property
+    def preskocene(self) -> list:
+        return list(self.data.get("preskocene") or [])
+
+    def uloz(self, zadani: dict, hotovo: int, celkem: int, soubory: list,
              aktualni_wav: str = "", vzorku: int = 0, kapitola: int = 0,
-             zdroj: str = "", parametry: dict = None, nazev: str = ""):
+             preskocene: list = None, nazev: str = ""):
         # Zdroj a parametry se ukládají proto, aby šlo rozdělaný převod vybrat
         # ze seznamu i po restartu, kdy má aplikace v polích něco jiného.
-        self.data = {"verze": 1, "otisk": otisk, "hotovo_bloku": hotovo,
+        self.data = {"verze": 2, "otisk_hlasu": zadani["otisk_hlasu"],
+                     "opravy": zadani.get("opravy") or {}, "hotovo_bloku": hotovo,
                      "celkem_bloku": celkem, "hotove_soubory": soubory,
                      "aktualni_wav": aktualni_wav, "vzorku_v_aktualnim": vzorku,
-                     "kapitola": kapitola, "zdroj": zdroj or self.data.get("zdroj", ""),
+                     "kapitola": kapitola,
+                     "zdroj": zadani.get("zdroj") or self.data.get("zdroj", ""),
                      "nazev": nazev or self.data.get("nazev", ""),
-                     "parametry": parametry or self.data.get("parametry", {})}
+                     "parametry": zadani.get("ulozitelne") or self.data.get("parametry", {}),
+                     "preskocene": list(self.preskocene if preskocene is None else preskocene)}
         try:
             docasny = self.cesta.with_suffix(".tmp")
             docasny.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -1964,25 +2028,26 @@ def orizni_okraje(vzorky, sr: int, zapnuto: bool = True):
     return d[zacatek:konec].copy(), orez
 
 
-def generuj_blok(engine, blok: str, p: dict, index: int, celkem: int, log) -> object:
-    """Vygeneruje blok; hlídá halucinační smyčky a při chybě to zkusí znovu.
+# Kratší kus už nemá smysl dál dělit - model by četl jednotlivá slova
+MIN_CAST_ZNAKU = 40
 
-    Používají to obě cesty - jednoprocesová i jednotlivý pracovník poolu.
-    """
+
+def _generuj_jednou(engine, text: str, p: dict, index: int, celkem: int, log):
+    """Až tři pokusy o jeden kus textu; hlídá halucinační smyčky. Vrátí vzorky, nebo None."""
     # Hrubý horní odhad délky: české čtení jede kolem 12-16 znaků/s
-    max_delka = len(blok) / 8.0 + 3.0
+    max_delka = len(text) / 8.0 + 3.0
 
     for pokus in range(1, 4):
         try:
             if pokus > 1:
                 nastav_seed(int(time.time() * 1000) % 999983)
-            vzorky = engine.generuj(blok, p["referencni_wav"], p["exaggeration"],
+            vzorky = engine.generuj(text, p["referencni_wav"], p["exaggeration"],
                                     p["cfg_weight"], p["temperature"],
                                     p.get("min_p", 0.05))
             delka = len(vzorky) / float(engine.sr)
 
             if delka > max_delka and pokus < 3:
-                log(T("log_dlouhy", index, celkem, delka, len(blok)))
+                log(T("log_dlouhy", index, celkem, delka, len(text)))
                 continue
             if delka < 0.05:
                 log(T("log_prazdny", index, celkem))
@@ -2006,9 +2071,41 @@ def generuj_blok(engine, blok: str, p: dict, index: int, celkem: int, log) -> ob
             except Exception:
                 pass
             time.sleep(0.5)
-
-    log(T("log_preskocen", index, celkem, blok[:60]))
     return None
+
+
+def generuj_blok(engine, blok: str, p: dict, index: int, celkem: int, log, _hloubka: int = 0):
+    """Vygeneruje blok. Vrací (vzorky nebo None, vynechané úseky textu).
+
+    Když blok nevyjde ani na tři pokusy, rozdělí se na kratší části a zkusí se
+    po nich - kratší text model rozhodí méně. Zpátky do knihy se to vloží na
+    stejné místo, takže pořadí sedí. Vynechá se jen to, co nevyjde ani po
+    rozdělení, a to se vrátí, ať se to dá uživateli ukázat.
+
+    Používají to obě cesty - jednoprocesová i jednotlivý pracovník poolu.
+    """
+    import numpy as np
+
+    vzorky = _generuj_jednou(engine, blok, p, index, celkem, log)
+    if vzorky is not None:
+        return vzorky, []
+
+    casti = rozdel_na_bloky(blok, max(MIN_CAST_ZNAKU, len(blok) // 2)) if _hloubka < 2 else []
+    if len(casti) < 2:
+        log(T("log_preskocen", index, celkem, blok[:60]))
+        return None, [blok]
+
+    log(T("log_rozdeleno", index, celkem, len(casti)))
+    pauza = np.zeros(int(engine.sr * min(p.get("pauza_ms", 250), 150) / 1000.0), dtype="float32")
+    kusy, vynechano = [], []
+    for cast in casti:
+        v, chybi = generuj_blok(engine, cast, p, index, celkem, log, _hloubka + 1)
+        vynechano += chybi
+        if v is not None:
+            if kusy:
+                kusy.append(pauza)
+            kusy.append(np.asarray(v, dtype="float32"))
+    return (np.concatenate(kusy) if kusy else None), vynechano
 
 
 def volna_vram_gb() -> float:
@@ -2086,7 +2183,7 @@ class Pool:
         self.ukoly.put((index, blok, celkem, p))
 
     def vezmi(self, timeout: float = 300.0):
-        """Vrátí (index, vzorky) dalšího bloku v pořadí, nebo None při chybě."""
+        """Vrátí (index, (vzorky, vynechané úseky)) dalšího bloku v pořadí, nebo None při chybě."""
         konec = time.time() + timeout
         while time.time() < konec:
             if self._dalsi in self._buffer:
@@ -2223,8 +2320,13 @@ class Aplikace(tk.Tk):
         nastav_jazyk(self.config_data.get("jazyk", "en"))
 
         self.title(f"{T('app_nazev')} v{VERSION}")
-        self.geometry("1000x980")
-        self.minsize(920, 820)
+        # Na nízkém monitoru se okno o pevných 980 bodech nevejde a ovládání
+        # i průběh zůstanou pod hranou obrazovky. Výška se proto řídí obrazovkou;
+        # sbalenými sekcemi jde okno zkrátit, takže minimum může být nízko.
+        sirka = min(1000, self.winfo_screenwidth() - 40)
+        vyska = min(980, self.winfo_screenheight() - 100)
+        self.geometry(f"{sirka}x{vyska}")
+        self.minsize(min(920, sirka), min(480, vyska))
 
         self.fronta = queue.Queue()
         self.vlakno = None
@@ -2239,6 +2341,9 @@ class Aplikace(tk.Tk):
         self.bezi = False
         self.prehravac = None
         self.obalka_cesta = None      # ať přežije přestavbu okna při změně jazyka
+        # Kopie, ne odkaz do DEFAULT_CONFIG - ten je sdílený
+        self.sbalene_sekce = dict(self.config_data.get("sbalene_sekce") or {})
+        self._kapitola_v_behu = -1     # kapitola, kterou právě ukazuje druhý pruh
 
         self._vytvor_promenne()
         self._vytvor_gui()
@@ -2302,6 +2407,7 @@ class Aplikace(tk.Tk):
             "obalka": bool(self.var_obalka.get()),
             "pracovniku": int(self.var_pracovniku.get()),
             "jazyk": aktualni_jazyk(),
+            "sbalene_sekce": dict(self.sbalene_sekce),
         }
         try:
             CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2383,6 +2489,8 @@ class Aplikace(tk.Tk):
 
         self.var_stav = tk.StringVar(value=T("stav_pripraveno"))
         self.var_postup = tk.DoubleVar(value=0.0)
+        self.var_postup_kapitola = tk.DoubleVar(value=0.0)
+        self.var_kapitola_info = tk.StringVar(value="")
         self.var_bloky_info = tk.StringVar(value="—/—")
         self.var_cas_info = tk.StringVar(value="—:—:—  /  —:—:—")
         self.var_jazyk = tk.StringVar(value=JAZYKY.get(aktualni_jazyk(), "English"))
@@ -2505,7 +2613,7 @@ class Aplikace(tk.Tk):
         self._zamknout(e, r1, r2, c1)
 
         # ---------------- Poslech ----------------
-        poslech = self._sekce(hlavni, T("sekce_poslech"))
+        poslech = self._sekce_sbalitelna(hlavni, T("sekce_poslech"), sbaleno=False, klic="poslech")
         rada = ttk.Frame(poslech)
         rada.grid(row=0, column=0, sticky="ew")
         ttk.Checkbutton(rada, text=T("lab_prehravat"), variable=self.var_poslouchat,
@@ -2544,7 +2652,7 @@ class Aplikace(tk.Tk):
                   style="Tlumeny.TLabel").grid(row=2, column=0, sticky="w", pady=(10, 0))
 
         # ---------------- Pokročilé (sbaleno) ----------------
-        gen = self._sekce_sbalitelna(hlavni, T("sekce_pokrocile"))
+        gen = self._sekce_sbalitelna(hlavni, T("sekce_pokrocile"), klic="pokrocile")
         gen.columnconfigure(1, weight=1)
 
         self.popisky_posuvniku = {}
@@ -2573,27 +2681,31 @@ class Aplikace(tk.Tk):
         cislo(1, T("lab_pauza_ms"), self.var_pauza, 0, 2000, 50)
         cislo(2, T("lab_seed"), self.var_seed, 0, 999999, 1)
 
+        # Dva řádky - v jednom se to do okna širokého 1000 bodů nevešlo
         spodek = ttk.Frame(gen)
         spodek.grid(row=4, column=0, columnspan=5, sticky="ew", pady=(14, 0))
         ttk.Label(spodek, text=T("lab_zarizeni")).pack(side="left", padx=(0, 12))
         cb = ttk.Combobox(spodek, textvariable=self.var_zarizeni, width=6, state="readonly",
                           values=["auto", "cuda", "cpu"])
         cb.pack(side="left")
-        ch2 = ttk.Checkbutton(spodek, text=T("lab_obalka"), variable=self.var_obalka)
-        ch2.pack(side="left", padx=(28, 0))
-        ch3 = ttk.Checkbutton(spodek, text=T("lab_lupance"), variable=self.var_lupance)
-        ch3.pack(side="left", padx=(28, 0))
-        ch4 = ttk.Checkbutton(spodek, text=T("lab_orez"), variable=self.var_orez)
-        ch4.pack(side="left", padx=(28, 0))
         ttk.Label(spodek, text=T("lab_pracovniku")).pack(side="left", padx=(28, 12))
         sp_w = ttk.Spinbox(spodek, from_=0, to=4, increment=1,
                            textvariable=self.var_pracovniku, width=5)
         sp_w.pack(side="left")
+
+        volby = ttk.Frame(gen)
+        volby.grid(row=5, column=0, columnspan=5, sticky="ew", pady=(10, 0))
+        ch2 = ttk.Checkbutton(volby, text=T("lab_obalka"), variable=self.var_obalka)
+        ch2.pack(side="left")
+        ch3 = ttk.Checkbutton(volby, text=T("lab_lupance"), variable=self.var_lupance)
+        ch3.pack(side="left", padx=(28, 0))
+        ch4 = ttk.Checkbutton(volby, text=T("lab_orez"), variable=self.var_orez)
+        ch4.pack(side="left", padx=(28, 0))
         self._zamknout(cb, ch2, ch3, ch4, sp_w)
 
         # Vlastní řádek - vedle je potřeba říct, co zapnutí stojí
         rada_rd = ttk.Frame(gen)
-        rada_rd.grid(row=5, column=0, columnspan=5, sticky="ew", pady=(10, 0))
+        rada_rd.grid(row=6, column=0, columnspan=5, sticky="ew", pady=(10, 0))
         ch5 = ttk.Checkbutton(rada_rd, text=T("lab_rychly_dekoder"),
                               variable=self.var_rychly_dekoder)
         ch5.pack(side="left")
@@ -2630,15 +2742,29 @@ class Aplikace(tk.Tk):
         ttk.Progressbar(postup, variable=self.var_postup, maximum=100.0,
                         style="Tenky.Horizontal.TProgressbar").grid(
             row=0, column=0, columnspan=3, sticky="ew")
-        ttk.Label(postup, textvariable=self.var_stav).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        # Hranice kapitol. Na ttk.Progressbar se kreslit nedá, takže rysky jsou
+        # na vlastním plátně hned pod ním - šířka i měřítko sedí.
+        self.platno_kapitol = tk.Canvas(postup, height=6, highlightthickness=0,
+                                        background=BARVY["pozadi"], borderwidth=0)
+        self.platno_kapitol.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(2, 0))
+        self.platno_kapitol.bind("<Configure>", lambda _u: self._vykresli_rysky_kapitol())
+        # Druhý pruh sleduje jen právě převáděnou kapitolu
+        self.pruh_kapitoly = ttk.Progressbar(postup, variable=self.var_postup_kapitola, maximum=100.0,
+                                             style="Tenky.Horizontal.TProgressbar")
+        self.pruh_kapitoly.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        ttk.Label(postup, textvariable=self.var_stav).grid(row=3, column=0, sticky="w", pady=(8, 0))
         ttk.Label(postup, textvariable=self.var_bloky_info, style="Tlumeny.TLabel").grid(
-            row=1, column=1, sticky="e", padx=(16, 16), pady=(8, 0))
+            row=3, column=1, sticky="e", padx=(16, 16), pady=(8, 0))
         ttk.Label(postup, textvariable=self.var_cas_info, style="Tlumeny.TLabel").grid(
-            row=1, column=2, sticky="e", pady=(8, 0))
+            row=3, column=2, sticky="e", pady=(8, 0))
+        self.popisek_kapitoly = ttk.Label(postup, textvariable=self.var_kapitola_info,
+                                          style="Tlumeny.TLabel")
+        self.popisek_kapitoly.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self._aktualizuj_pruh_kapitol()
 
         # ---------------- Log ----------------
         ramec_log = self._sekce_sbalitelna(hlavni, T("sekce_prubeh"), sbaleno=False,
-                                           roztahnout=True, mezera_nahore=20)
+                                           roztahnout=True, mezera_nahore=20, klic="prubeh")
         ramec_log.columnconfigure(0, weight=1)
         ramec_log.rowconfigure(0, weight=1)
 
@@ -2700,8 +2826,13 @@ class Aplikace(tk.Tk):
         return obsah
 
     def _sekce_sbalitelna(self, rodic, nadpis: str, sbaleno: bool = True,
-                          roztahnout: bool = False, mezera_nahore: int = 0) -> ttk.Frame:
-        """Sekce, kterou lze kliknutím na nadpis sbalit. Drží pokročilá nastavení z cesty."""
+                          roztahnout: bool = False, mezera_nahore: int = 0,
+                          klic: str = "") -> ttk.Frame:
+        """Sekce, kterou lze kliknutím na nadpis sbalit. Drží pokročilá nastavení z cesty.
+
+        Se zadaným 'klic' si stav pamatuje v konfiguraci - kdo si okno jednou
+        zkrátí, nemusí to dělat po každém spuštění znovu.
+        """
         obal = ttk.Frame(rodic)
         obal.pack(fill="both" if roztahnout else "x",
                   expand=roztahnout, pady=(mezera_nahore, 20))
@@ -2721,7 +2852,7 @@ class Aplikace(tk.Tk):
         obsah = ttk.Frame(obal)
         obsah.columnconfigure(0, weight=1)
 
-        stav = {"sbaleno": sbaleno}
+        stav = {"sbaleno": bool(self.sbalene_sekce.get(klic, sbaleno)) if klic else sbaleno}
 
         def vykresli():
             sipka = "+" if stav["sbaleno"] else "−"
@@ -2734,6 +2865,8 @@ class Aplikace(tk.Tk):
         def prepni(_udalost=None):
             stav["sbaleno"] = not stav["sbaleno"]
             vykresli()
+            if klic:
+                self.sbalene_sekce[klic] = stav["sbaleno"]
 
         for w in (znacka, linka, zahlavi):
             w.bind("<Button-1>", prepni)
@@ -3038,6 +3171,59 @@ class Aplikace(tk.Tk):
         except Exception as chyba:
             self.log(T("log_obalka_nahled", chyba))
 
+    # ------------------------------------------------------------------
+    #  Kapitoly v ukazateli průběhu
+    # ------------------------------------------------------------------
+    def _aktualizuj_pruh_kapitol(self):
+        """Pruh, rysky a popisek kapitol ukáže jen u knihy, která kapitoly má."""
+        ma = len(self.kapitoly) > 1
+        for w in (self.platno_kapitol, self.pruh_kapitoly, self.popisek_kapitoly):
+            if ma:
+                w.grid()
+            else:
+                w.grid_remove()
+        if not ma:
+            self.var_postup_kapitola.set(0.0)
+            self.var_kapitola_info.set("")
+        self._vykresli_rysky_kapitol()
+
+    def _konec_kapitoly(self, kap_i: int) -> int:
+        """Kolik bloků knihy je hotovo, když skončí kapitola kap_i."""
+        if kap_i + 1 < len(self.kapitoly):
+            return self.kapitoly[kap_i + 1]["prvni_blok"]
+        return len(self.bloky)
+
+    def _vykresli_rysky_kapitol(self):
+        """Svislé rysky na hranicích kapitol, právě převáděná kapitola podtržená."""
+        platno = self.platno_kapitol
+        platno.delete("all")
+        if len(self.kapitoly) <= 1 or not self.bloky:
+            return
+        sirka = max(platno.winfo_width(), 1)
+        vyska = max(platno.winfo_height(), 1)
+        celkem = float(len(self.bloky))
+        for i, kap in enumerate(self.kapitoly):
+            x = min(sirka - 1.0, kap["prvni_blok"] / celkem * sirka)
+            if i == self._kapitola_v_behu:
+                x2 = min(float(sirka), self._konec_kapitoly(i) / celkem * sirka)
+                platno.create_rectangle(x, vyska - 3, max(x + 1.0, x2), vyska,
+                                        fill=BARVY["akcent"], outline="")
+            platno.create_line(x, 0, x, vyska, fill=BARVY["linka"])
+
+    def _postup_kapitoly(self, hotovo: int, kap_i: int):
+        """Druhý pruh a jeho popisek podle pozice uvnitř převáděné kapitoly."""
+        if len(self.kapitoly) <= 1 or not 0 <= kap_i < len(self.kapitoly):
+            return
+        prvni = self.kapitoly[kap_i]["prvni_blok"]
+        bloku = self._konec_kapitoly(kap_i) - prvni
+        v_kapitole = hotovo - prvni
+        self.var_postup_kapitola.set(100.0 * v_kapitole / bloku if bloku else 0.0)
+        self.var_kapitola_info.set(T("prubeh_kapitola", kap_i + 1, len(self.kapitoly),
+                                     v_kapitole, bloku))
+        if kap_i != self._kapitola_v_behu:
+            self._kapitola_v_behu = kap_i
+            self._vykresli_rysky_kapitol()
+
     def _zpracuj_frontu(self):
         try:
             while True:
@@ -3045,11 +3231,12 @@ class Aplikace(tk.Tk):
                 if typ == "log":
                     self.log(data)
                 elif typ == "postup":
-                    hotovo, celkem, uplynulo, zbyva = data
+                    hotovo, celkem, uplynulo, zbyva, kap_i = data
                     self.var_postup.set(100.0 * hotovo / celkem if celkem else 0.0)
                     self.var_bloky_info.set(T("prubeh_bloky", hotovo, celkem))
                     self.var_cas_info.set(
                         T("prubeh_cas", formatuj_cas(uplynulo), formatuj_cas(zbyva)))
+                    self._postup_kapitoly(hotovo, kap_i)
                 elif typ == "stav":
                     self.var_stav.set(data)
                 elif typ == "hotovo":
@@ -3154,6 +3341,10 @@ class Aplikace(tk.Tk):
             if not self.bloky:
                 raise ValueError("Text se nepodařilo rozdělit na bloky.")
             self.ma_kapitoly = ma_kapitoly and len(self.kapitoly) > 1
+            self._kapitola_v_behu = -1
+            self.var_postup_kapitola.set(0.0)
+            self.var_kapitola_info.set("")
+            self._aktualizuj_pruh_kapitol()
 
             self.nazev_knihy = cesta.stem
             znaku = sum(len(b) for _, b in self.bloky)
@@ -3174,6 +3365,7 @@ class Aplikace(tk.Tk):
             self.bloky = []
             self.kapitoly = []
             self.ma_kapitoly = False
+            self._aktualizuj_pruh_kapitol()
             self.var_soubor_info.set(T("info_nezdarilo"))
             self.log(T("log_chyba", chyba))
             messagebox.showerror(T("dlg_chyba_nacteni"), str(chyba))
@@ -3236,6 +3428,7 @@ class Aplikace(tk.Tk):
             "temperature": float(self.var_temp.get()),
             "min_p": float(self.var_min_p.get()),
             "odstranit_lupance": bool(self.var_lupance.get()),
+            "orezat_okraje": bool(self.var_orez.get()),
             "rychly_dekoder": bool(self.var_rychly_dekoder.get()),
             "seed": int(self.var_seed.get() or 0),
             "zarizeni": self.var_zarizeni.get(),
@@ -3248,6 +3441,19 @@ class Aplikace(tk.Tk):
             "obalka": bool(self.var_obalka.get()),
             "pracovniku": int(self.var_pracovniku.get()),
         }
+
+    # Popisky nastavení pro hlášky o tom, co se od přerušení změnilo
+    NAZVY_NASTAVENI = {
+        "jazyk_textu": "lab_jazyk_textu", "referencni_wav": "nazev_hlas",
+        "exaggeration": "lab_expresivita", "cfg_weight": "lab_cfg", "temperature": "lab_teplota",
+        "min_p": "lab_min_p", "seed": "lab_seed", "pauza_ms": "lab_pauza_ms",
+        "format": "nazev_format", "bitrate": "nazev_bitrate", "max_znaku": "lab_znaku",
+        "odstranit_lupance": "lab_lupance", "orezat_okraje": "lab_orez",
+        "rychly_dekoder": "lab_rychly_dekoder", "slovnik": "nazev_slovnik",
+    }
+
+    def _nazev_nastaveni(self, klic: str) -> str:
+        return T(self.NAZVY_NASTAVENI.get(klic, klic))
 
     def pokracuj_v_rozdelanem(self):
         """Nabídne seznam přerušených převodů a v tom vybraném pokračuje."""
@@ -3300,6 +3506,7 @@ class Aplikace(tk.Tk):
             ("format", self.var_format, str),
             ("bitrate", self.var_bitrate, str),
             ("odstranit_lupance", self.var_lupance, bool),
+            ("orezat_okraje", self.var_orez, bool),
             ("obalka", self.var_obalka, bool),
             ("rychly_dekoder", self.var_rychly_dekoder, bool),
         ]
@@ -3347,17 +3554,24 @@ class Aplikace(tk.Tk):
         if parametry["format"] == "MP3" and not najdi_ffmpeg():
             messagebox.showwarning(T("dlg_ffmpeg"), T("dlg_ffmpeg_text"))
             parametry["format"] = "WAV"
-        parametry["otisk"] = otisk_zadani(Path(self.var_vstup.get().strip('" ')),
-                                          parametry, len(self.bloky))
+        cesta_knihy = Path(self.var_vstup.get().strip('" '))
+        texty = [b for _, b in self.bloky]
+        kod = (parametry.get("jazyk_textu") or "").split("|")[0]
+        parametry["otisk_hlasu"] = otisk_hlasu(cesta_knihy, parametry, texty)
+        parametry["otisk_verze_1"] = otisk_verze_1(cesta_knihy, parametry, len(texty))
+        parametry["opravy"] = {**{k: parametry.get(k) for k in NASTAVENI_OPRAV},
+                               "slovnik": otisk_vyslovnosti(kod)}
         parametry["zdroj"] = self.var_vstup.get().strip('" ')
         parametry["ulozitelne"] = {k: v for k, v in parametry.items()
-                                   if k not in ("otisk", "ulozitelne")}
+                                   if k not in ("otisk_hlasu", "otisk_verze_1", "opravy", "ulozitelne")}
         parametry["ulozitelne"]["max_znaku"] = int(self.var_max_znaku.get())
 
         # --- navázat na přerušený běh? ---
         postup = Postup.nacti(slozka / (nazev + ".progress.json"))
         od_bloku = 0
-        if postup.sedi(parametry["otisk"]) and 0 < postup.hotovo_bloku < len(self.bloky):
+        prepsani_potvrzeno = False
+        jde, zmeny = posud_navazani(postup.data, parametry)
+        if jde and 0 < postup.hotovo_bloku < len(self.bloky):
             odpoved = True if automaticky_navazat else messagebox.askyesnocancel(
                 T("dlg_navazat"),
                 T("dlg_navazat_text", postup.hotovo_bloku, len(self.bloky),
@@ -3366,19 +3580,33 @@ class Aplikace(tk.Tk):
                 return                       # Zrušit
             if odpoved:
                 od_bloku = postup.hotovo_bloku
+                if zmeny:
+                    self.log(T("log_navazuji_zmeny", ", ".join(self._nazev_nastaveni(k) for k in zmeny)))
             else:
                 postup.smaz()                # začít znovu od začátku
                 postup = Postup.nacti(postup.cesta)
-        elif postup.data and not postup.sedi(parametry["otisk"]):
-            # Stav existuje, ale kniha nebo parametry se změnily - navazovat nelze
+        elif postup.data and not jde:
+            # Navázat nejde. Dřív se stav tiše smazal a hotové kapitoly se
+            # postupně přepsaly - teď o tom rozhodne uživatel.
+            duvod = (", ".join(self._nazev_nastaveni(k) for k in zmeny) if zmeny
+                     else T("duvod_neznamy"))
+            if not messagebox.askyesno(T("dlg_nelze_navazat"),
+                                       T("dlg_nelze_navazat_text", postup.hotovo_bloku,
+                                         postup.data.get("celkem_bloku") or len(self.bloky), duvod)):
+                return
             self.log(T("log_postup_neplatny"))
             postup.smaz()
             postup = Postup.nacti(postup.cesta)
+            prepsani_potvrzeno = True
 
         # Přepsat existující výstup? Ptáme se jen když nenavazujeme.
-        if od_bloku == 0:
+        if od_bloku == 0 and not prepsani_potvrzeno:
             hotovy = [zaklad.with_suffix(".wav"), zaklad.with_suffix(".mp3")]
             existujici = [c for c in hotovy if c.exists()]
+            # U knihy po kapitolách je výstupem složka - bez téhle kontroly
+            # by se hotové kapitoly přepsaly bez ptaní
+            if zaklad.is_dir() and any(f.suffix.lower() in (".mp3", ".wav") for f in zaklad.iterdir()):
+                existujici.append(zaklad)
             if existujici and not messagebox.askyesno(T("dlg_existuje"),
                                                       T("dlg_prepsat", existujici[0])):
                 return
@@ -3400,6 +3628,9 @@ class Aplikace(tk.Tk):
         self.btn_stop.config(state="normal")
         self._zamkni_ovladani(True)      # formát ani cesty už za běhu neměnit
         self.var_postup.set(100.0 * od_bloku / len(self.bloky) if od_bloku else 0.0)
+        self.var_postup_kapitola.set(0.0)
+        self._kapitola_v_behu = -1
+        self._vykresli_rysky_kapitol()
         self.var_poslech_info.set("")
 
         self.vlakno = threading.Thread(
@@ -3494,7 +3725,8 @@ class Aplikace(tk.Tk):
                     self.prehravac = None
 
             hotove = list(postup.data.get("hotove_soubory") or []) if postup else []
-            otisk = p["otisk"]
+            # Úseky, které se nepodařilo vygenerovat - přežijí i přerušení
+            preskocene = postup.preskocene if (postup is not None and od_bloku) else []
 
             def cesta_kapitoly(kap_i):
                 nazev = (self.kapitoly[kap_i].get("nazev") or "").strip()
@@ -3553,7 +3785,7 @@ class Aplikace(tk.Tk):
 
             start = time.time()
 
-            for index, kap_i, blok, vzorky in self._proud_bloku(bloky, p, od_bloku, pool):
+            for index, kap_i, blok, (vzorky, vynechano) in self._proud_bloku(bloky, p, od_bloku, pool):
                 # nová kapitola = nový soubor
                 if self._zapisovac is None or (po_kapitolach and kap_i != aktualni_kap):
                     if po_kapitolach and self._zapisovac is not None:
@@ -3562,6 +3794,8 @@ class Aplikace(tk.Tk):
                     cil = cesta_kapitoly(kap_i) if po_kapitolach else jediny_wav
                     self._zapisovac = WavZapisovacRaw(cil, sr)
 
+                for text in vynechano:
+                    preskocene.append({"blok": index, "kapitola": kap_i + 1, "text": text})
                 if vzorky is None:
                     neuspesne += 1
                 else:
@@ -3571,16 +3805,15 @@ class Aplikace(tk.Tk):
                         self.prehravac.pridej(vzorky, p["pauza_ms"])
 
                 if postup is not None:
-                    postup.uloz(otisk, index, celkem, hotove, str(self._zapisovac.cesta),
+                    postup.uloz(p, index, celkem, hotove, str(self._zapisovac.cesta),
                                 self._zapisovac.pocet_vzorku, aktualni_kap,
-                                zdroj=p.get("zdroj", ""), parametry=p.get("ulozitelne", {}),
-                                nazev=zaklad.stem)
+                                preskocene=preskocene, nazev=zaklad.stem)
 
                 znaku_hotovo += len(blok)
                 uplynulo = time.time() - start
                 rychlost = (znaku_hotovo - znaku_pred) / uplynulo if uplynulo > 0 else 0
                 zbyva = (znaku_celkem - znaku_hotovo) / rychlost if rychlost > 0 else -1
-                self.fronta.put(("postup", (index, celkem, uplynulo, zbyva)))
+                self.fronta.put(("postup", (index, celkem, uplynulo, zbyva, kap_i)))
 
                 if index % 25 == 0:
                     self.log_z_vlakna(T("log_prubeh", index, celkem,
@@ -3636,15 +3869,18 @@ class Aplikace(tk.Tk):
                 if zastaveno:
                     # Doplnit seznam hotových kapitol - v cyklu se ukládá
                     # ještě před jejich převodem na MP3.
-                    postup.uloz(otisk, postup.hotovo_bloku, celkem, hotove,
+                    postup.uloz(p, postup.hotovo_bloku, celkem, hotove,
                                 postup.data.get("aktualni_wav", ""),
                                 postup.data.get("vzorku_v_aktualnim", 0),
-                                postup.data.get("kapitola", 0))
+                                postup.data.get("kapitola", 0), preskocene=preskocene)
                 else:
                     postup.smaz()      # doběhlo celé, není na co navazovat
 
             self.log_z_vlakna((T("log_zastaveno_ul") if zastaveno else T("log_hotovo")) + souhrn
                               + (T("log_neuspesne", neuspesne) if neuspesne else ""))
+            if preskocene:
+                self.log_z_vlakna(T("log_chybejici", len(preskocene),
+                                    self._zapis_chybejici(zaklad, preskocene)))
             if zastaveno and postup is not None:
                 self.log_z_vlakna(T("log_lze_navazat"))
             self.fronta.put(("hotovo", str(vysledek)))
@@ -3660,7 +3896,7 @@ class Aplikace(tk.Tk):
             self.fronta.put(("chyba", str(chyba)))
 
     def _proud_bloku(self, bloky, p, od_bloku, pool):
-        """Vydává (index, kapitola, text, vzorky) v původním pořadí.
+        """Vydává (index, kapitola, text, (vzorky, vynechané úseky)) v původním pořadí.
 
         Jedna cesta pro obě varianty - buď se generuje rovnou, nebo se bloky
         rozešlou pracovníkům a tady se počká, až dojde ten, který je na řadě.
@@ -3703,10 +3939,18 @@ class Aplikace(tk.Tk):
             vysledek = pool.vezmi()
             if vysledek is None:
                 raise RuntimeError(pool.chyba or "generující proces selhal")
-            index, vzorky = vysledek
+            index, data = vysledek
             pool.potvrd()
             hotovo = index
-            yield index, bloky[index - 1][0], bloky[index - 1][1], vzorky
+            yield index, bloky[index - 1][0], bloky[index - 1][1], data
+
+    def _zapis_chybejici(self, zaklad: Path, preskocene: list) -> Path:
+        """Seznam úseků, které se nepodařilo vygenerovat, ať je jde v knize najít."""
+        cesta = zaklad.parent / (zaklad.stem + T("soubor_chybejici"))
+        radky = [T("chybejici_hlavicka"), ""]
+        radky += [T("chybejici_radek", u["blok"], u["kapitola"], u["text"]) for u in preskocene]
+        cesta.write_text("\n".join(radky) + "\n", encoding="utf-8")
+        return cesta
 
     def _generuj_s_opakovanim(self, blok: str, p: dict, index: int, celkem: int):
         return generuj_blok(self.engine, blok, p, index, celkem, self.log_z_vlakna)
@@ -3744,6 +3988,7 @@ class Aplikace(tk.Tk):
         self.var_stav.set(T("stav_zastaveno") if zastaveno else T("stav_hotovo"))
         if not zastaveno:
             self.var_postup.set(100.0)
+            self.var_postup_kapitola.set(100.0)
 
         nadpis = T("stav_zastaveno") if zastaveno else T("dlg_hotovo")
         popis = T("dlg_zastaveno_text") if zastaveno else T("dlg_hotovo_text")

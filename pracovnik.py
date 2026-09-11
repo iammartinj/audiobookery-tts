@@ -37,8 +37,8 @@ def bezet(ukoly, vysledky, nastaveni):
             # kolik pracovníků běží ani kdo blok zrovna dostal.
             if p.get("seed"):
                 ab.nastav_seed(int(p["seed"]) + index)
-            vzorky = ab.generuj_blok(engine, blok, p, index, celkem, log)
-            vysledky.put(("audio", index, vzorky))
+            # (vzorky, vynechané úseky) - rodič si vynechané zapíše do seznamu
+            vysledky.put(("audio", index, ab.generuj_blok(engine, blok, p, index, celkem, log)))
     except Exception as chyba:
         try:
             vysledky.put(("chyba", id_p, "{}: {}".format(type(chyba).__name__, chyba)))
