@@ -204,6 +204,7 @@ DEFAULT_CONFIG = {
     "min_p": 0.05,
     "odstranit_lupance": True,
     "orezat_okraje": True,
+    "rychly_dekoder": False,
     "seed": 0,
     # Jazyk syntézy je nezávislý na jazyku rozhraní - v českém rozhraní
     # klidně vyrábíte anglickou audioknihu.
@@ -888,6 +889,10 @@ def otisk_zadani(cesta_knihy: Path, p: dict, celkem_bloku: int) -> str:
                  "seed", "pauza_ms",
                  "format", "bitrate"):
         h.update(f"{klic}={p.get(klic)}".encode("utf-8"))
+    # Rychlý dekodér jen když je zapnutý. Vypnutý dává stejný otisk jako
+    # verze, která tuhle volbu ještě neměla, takže rozdělané knihy navážou.
+    if p.get("rychly_dekoder"):
+        h.update(b"rychly_dekoder=True")
     h.update(f"bloku={celkem_bloku}".encode("utf-8"))
     h.update(otisk_vyslovnosti().encode("utf-8"))
     ref = p.get("referencni_wav")
@@ -1320,6 +1325,21 @@ def formatuj_cas(sekundy: float) -> str:
 #  TTS engine - obaluje Chatterbox Multilingual
 # ==========================================================================
 
+# Destilovaný dekodér z Chatterbox Turbo. Tokeny na zvuk převádí ve 2 krocích
+# místo 10 a bez CFG. Na 2080 Ti naměřeno 0,73 -> 0,17 s na blok, celý převod
+# se ale zrychlí jen o 11 % - 88 % času zabere T3, ne dekodér. Vokodér, enkodér
+# hlasu i tokenizer jsou s vícejazyčným s3gen bitově shodné, liší se jen flow.
+RYCHLY_DEKODER_REPO = "ResembleAI/chatterbox-turbo"
+RYCHLY_DEKODER_SOUBOR = "s3gen_meanflow.safetensors"
+RYCHLY_DEKODER_GB = 1.1
+
+
+def rychly_dekoder_stazeny() -> bool:
+    """Je rychlý dekodér už v cache? Jen se podívá na disk, nic nestahuje."""
+    slozka = CACHE_DIR / "hub" / ("models--" + RYCHLY_DEKODER_REPO.replace("/", "--"))
+    return slozka.is_dir() and any(slozka.rglob(RYCHLY_DEKODER_SOUBOR))
+
+
 class TtsEngine:
     def __init__(self, log_fn):
         self.log = log_fn
@@ -1330,6 +1350,7 @@ class TtsEngine:
         self.finetune_nacten = False
         self.nacteny_repo = None
         self.jazyk = None
+        self.rychly_dekoder = False
 
     # ------------------------------------------------------------------
     @contextlib.contextmanager
@@ -1371,17 +1392,20 @@ class TtsEngine:
         return "cpu"
 
     # ------------------------------------------------------------------
-    def nacti_model(self, volba_zarizeni: str = "auto", jazyk_klic: str = "en"):
+    def nacti_model(self, volba_zarizeni: str = "auto", jazyk_klic: str = "en",
+                    rychly_dekoder: bool = False):
         import torch
 
         pozadovane_zarizeni = self.vyber_zarizeni(volba_zarizeni)
         jazyk = jazyk_podle_klice(jazyk_klic)
         pozadovany_repo = jazyk.get("repo") if jazyk.get("zdroj") == "finetune" else None
+        rychly_dekoder = bool(rychly_dekoder)
 
         if self.model is not None:
-            # Jiné zařízení nebo jiný jazykový checkpoint = čistý start.
+            # Jiné zařízení, jazykový checkpoint nebo dekodér = čistý start.
             # Nechat na T3 váhy po předchozím jazyce by bylo horší než nic.
-            if pozadovane_zarizeni != self.zarizeni or self.nacteny_repo != pozadovany_repo:
+            if (pozadovane_zarizeni != self.zarizeni or self.nacteny_repo != pozadovany_repo
+                    or rychly_dekoder != self.rychly_dekoder):
                 self.log(T("log_znovu"))
                 self.uvolni()
             else:
@@ -1389,6 +1413,7 @@ class TtsEngine:
 
         self.zarizeni = pozadovane_zarizeni
         self.jazyk = jazyk
+        self.rychly_dekoder = rychly_dekoder
         self.log(T("log_zarizeni", self.zarizeni))
         if self.zarizeni == "cuda":
             try:
@@ -1419,6 +1444,55 @@ class TtsEngine:
             self._nacti_finetune(jazyk)
         elif jazyk.get("zdroj") == "finetune":
             self.log(T("log_bez_ft", jazyk["nazev"]))
+
+        if rychly_dekoder:
+            self._zapni_rychly_dekoder()
+
+    # ------------------------------------------------------------------
+    def stahni_rychly_dekoder(self) -> Path:
+        """Vrátí cestu k vahám rychlého dekodéru. Když chybí, stáhne je.
+
+        Rodič to volá ještě před spuštěním pracovníků - jinak by si soubor
+        při prvním použití stahovalo několik procesů naráz.
+        """
+        from huggingface_hub import hf_hub_download
+
+        argumenty = dict(repo_id=RYCHLY_DEKODER_REPO, filename=RYCHLY_DEKODER_SOUBOR,
+                         cache_dir=str(CACHE_DIR / "hub"))
+        if rychly_dekoder_stazeny():
+            return Path(hf_hub_download(local_files_only=True, **argumenty))
+        self.log(T("log_rd_stahuji", RYCHLY_DEKODER_GB))
+        with self._hlaseni_stahovani(T("lab_rychly_dekoder")):
+            return Path(hf_hub_download(token=os.environ.get("HF_TOKEN") or None, **argumenty))
+
+    # ------------------------------------------------------------------
+    def _zapni_rychly_dekoder(self):
+        """Vymění dekodér zvuku za destilovanou verzi z Chatterbox Turbo.
+
+        Uživatel si ho zapnul výslovně, takže když se nenačte, převod skončí
+        chybou. Tiše pokračovat se standardním by znamenalo, že otisk knihy
+        tvrdí něco jiného, než z čeho zvuk opravdu vznikl.
+        """
+        import gc
+        import torch
+        from safetensors.torch import load_file
+        from chatterbox.models.s3gen import S3Gen
+
+        try:
+            cesta = self.stahni_rychly_dekoder()
+            dekoder = S3Gen(meanflow=True)
+            dekoder.load_state_dict(load_file(str(cesta), device="cpu"))
+        except Exception as chyba:
+            raise RuntimeError(T("err_rd", f"{type(chyba).__name__}: {chyba}")) from chyba
+
+        # Starý dekodér pustit dřív, než se nový přesune na kartu. Jinak by
+        # na chvíli ležely v paměti oba a pracovníkům by to ubralo místo.
+        self.model.s3gen = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self.model.s3gen = dekoder.to(self.zarizeni).eval()
+        self.log(T("log_rd_aktivni"))
 
     # ------------------------------------------------------------------
     def _odemkni_jazyk(self, modul, kod: str):
@@ -1575,6 +1649,7 @@ class TtsEngine:
         self.finetune_nacten = False
         self.nacteny_repo = None
         self.podporuje_jazyk = True
+        self.rychly_dekoder = False
         try:
             import torch, gc
             gc.collect()
@@ -2098,6 +2173,7 @@ class Aplikace(tk.Tk):
             "min_p": float(self.var_min_p.get()),
             "odstranit_lupance": bool(self.var_lupance.get()),
             "orezat_okraje": bool(self.var_orez.get()),
+            "rychly_dekoder": bool(self.var_rychly_dekoder.get()),
             "seed": int(self.var_seed.get() or 0),
             "jazyk_textu": self._klic_jazyka_textu(),
             "zarizeni": self.var_zarizeni.get(),
@@ -2176,6 +2252,7 @@ class Aplikace(tk.Tk):
         self.var_min_p = tk.DoubleVar(value=c["min_p"])
         self.var_lupance = tk.BooleanVar(value=c["odstranit_lupance"])
         self.var_orez = tk.BooleanVar(value=c["orezat_okraje"])
+        self.var_rychly_dekoder = tk.BooleanVar(value=c["rychly_dekoder"])
         self.var_seed = tk.IntVar(value=c["seed"])
         self.var_jazyk_textu = tk.StringVar(value=self._nazev_jazyka_textu(c["jazyk_textu"]))
         self.var_zarizeni = tk.StringVar(value=c["zarizeni"])
@@ -2394,6 +2471,17 @@ class Aplikace(tk.Tk):
                            textvariable=self.var_pracovniku, width=5)
         sp_w.pack(side="left")
         self._zamknout(cb, ch2, ch3, ch4, sp_w)
+
+        # Vlastní řádek - vedle je potřeba říct, co zapnutí stojí
+        rada_rd = ttk.Frame(gen)
+        rada_rd.grid(row=5, column=0, columnspan=5, sticky="ew", pady=(10, 0))
+        ch5 = ttk.Checkbutton(rada_rd, text=T("lab_rychly_dekoder"),
+                              variable=self.var_rychly_dekoder)
+        ch5.pack(side="left")
+        ttk.Label(rada_rd, text=T("hint_rd_stazeno") if rychly_dekoder_stazeny()
+                  else T("hint_rd_stahne", RYCHLY_DEKODER_GB),
+                  style="Tlumeny.TLabel").pack(side="left", padx=(14, 0))
+        self._zamknout(ch5)
 
         # ---------------- Ovládání ----------------
         ovladani = ttk.Frame(hlavni)
@@ -2991,7 +3079,7 @@ class Aplikace(tk.Tk):
     def _worker_test(self, veta: str, p: dict):
         vystup = None
         try:
-            self.engine.nacti_model(p["zarizeni"], p["jazyk_textu"])
+            self.engine.nacti_model(p["zarizeni"], p["jazyk_textu"], p.get("rychly_dekoder", False))
             nastav_seed(p["seed"])
 
             self.log_z_vlakna(T("log_generuji_uk"))
@@ -3025,6 +3113,7 @@ class Aplikace(tk.Tk):
             "temperature": float(self.var_temp.get()),
             "min_p": float(self.var_min_p.get()),
             "odstranit_lupance": bool(self.var_lupance.get()),
+            "rychly_dekoder": bool(self.var_rychly_dekoder.get()),
             "seed": int(self.var_seed.get() or 0),
             "zarizeni": self.var_zarizeni.get(),
             "jazyk_textu": self._klic_jazyka_textu(),
@@ -3089,7 +3178,10 @@ class Aplikace(tk.Tk):
             ("bitrate", self.var_bitrate, str),
             ("odstranit_lupance", self.var_lupance, bool),
             ("obalka", self.var_obalka, bool),
+            ("rychly_dekoder", self.var_rychly_dekoder, bool),
         ]
+        # Kniha uložená dřív, než rychlý dekodér existoval, vznikla bez něj
+        parametry = {"rychly_dekoder": False, **parametry}
         zmeneno = []
         for klic, promenna, typ in mapovani:
             if klic not in parametry:
@@ -3222,7 +3314,12 @@ class Aplikace(tk.Tk):
             pocet = int(p.get("pracovniku") or 0) or doporuceny_pocet_pracovniku()
             if pocet > 1:
                 self.log_z_vlakna(T("log_pool_start", pocet, volna_vram_gb()))
-                pool = Pool(pocet, {"zarizeni": p["zarizeni"], "jazyk_textu": p["jazyk_textu"]},
+                if p.get("rychly_dekoder"):
+                    # Stáhnout teď, jinak by si ho při prvním použití
+                    # stahoval každý pracovník zvlášť
+                    self.engine.stahni_rychly_dekoder()
+                pool = Pool(pocet, {"zarizeni": p["zarizeni"], "jazyk_textu": p["jazyk_textu"],
+                                    "rychly_dekoder": bool(p.get("rychly_dekoder"))},
                             self.log_z_vlakna)
                 if not pool.pockej_na_start():
                     self.log_z_vlakna(T("log_pool_selhal", pool.chyba or "?"))
@@ -3233,7 +3330,7 @@ class Aplikace(tk.Tk):
 
             if pool is None:
                 self.log_z_vlakna(T("log_pool_jeden"))
-                self.engine.nacti_model(p["zarizeni"], p["jazyk_textu"])
+                self.engine.nacti_model(p["zarizeni"], p["jazyk_textu"], p.get("rychly_dekoder", False))
                 sr = self.engine.sr
             else:
                 sr = pool.sr

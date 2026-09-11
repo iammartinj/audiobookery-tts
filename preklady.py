@@ -98,6 +98,11 @@ TEXTY = {
     "lab_orez":         ("trim block edges", "oříznout okraje bloku"),
     "lab_lupance":      ("remove clicks", "odstranit lupance"),
     "lab_obalka":       ("generate cover", "vygenerovat obálku"),
+    "lab_rychly_dekoder": ("fast decoder", "rychlý dekodér"),
+    "hint_rd_stahne":   ("~10 % faster conversion · downloads {0:.1f} GB on first use",
+                         "převod o ~10 % rychlejší · při prvním použití stáhne {0:.1f} GB"),
+    "hint_rd_stazeno":  ("~10 % faster conversion · already downloaded",
+                         "převod o ~10 % rychlejší · už je stažený"),
     "hint_hlas":        ("without a reference recording the model's default english voice is used",
                          "bez referenční nahrávky se použije výchozí anglický hlas modelu"),
 
@@ -231,6 +236,14 @@ TEXTY = {
                          "Start převodu: {0} bloků -> {1}"),
     "log_orez":         ("Block {1}/{2}: {0:.1f} s of murmur trimmed from the edges.",
                          "Blok {1}/{2}: oříznuto {0:.1f} s brblání na okrajích."),
+    "log_rd_stahuji":   ("Downloading the fast decoder ({0:.1f} GB, one time only)...",
+                         "Stahuji rychlý dekodér ({0:.1f} GB, jen jednou)..."),
+    "log_rd_aktivni":   ("Fast decoder active - 2 steps instead of 10.",
+                         "Rychlý dekodér aktivní - 2 kroky místo 10."),
+    "err_rd":           ("The fast decoder could not be loaded ({0}). "
+                         "Turn it off in advanced settings or try again.",
+                         "Rychlý dekodér se nepodařilo načíst ({0}). "
+                         "Vypněte ho v pokročilém nastavení, nebo to zkuste znovu."),
     "log_lupance":      ("Block {1}/{2}: {0} click(s) removed from pauses.",
                          "Blok {1}/{2}: {0} lupanec/ů odstraněno z pauz."),
     "log_obalka":       ("Cover generated: {0}", "Obálka vygenerována: {0}"),
