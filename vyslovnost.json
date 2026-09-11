@@ -17,10 +17,15 @@
     "",
     "Přidávejte jen slova, u kterých vadu opravdu slyšíte. Plošné pravidlo",
     "'ti -> ťi' by rozbilo přejatá slova jako politika nebo matematika,",
-    "která se čtou tvrdě - proto je tenhle seznam ruční."
+    "která se čtou tvrdě - proto je tenhle seznam ruční.",
+    "",
+    "U českých knih se navíc použije vyslovnost_cs.json: háčky u tvarů, kde",
+    "měkké čtení potvrzuje Wikislovník. Tahle pravidla se uplatní dřív a mají",
+    "přednost."
   ],
 
   "nahrady": {
-    "tich*": "ťich*"
+    "tich*": "ťich*",
+    "utich*": "uťich*"
   }
 }

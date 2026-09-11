@@ -23,6 +23,7 @@ import traceback
 import subprocess
 import contextlib
 import collections
+import functools
 from pathlib import Path
 
 from preklady import T, JAZYKY, nastav_jazyk, aktualni_jazyk
@@ -72,6 +73,24 @@ def nacti_vyslovnost() -> dict:
 
 VYSLOVNOST = nacti_vyslovnost()
 
+VYSLOVNOST_CS_PATH = APP_DIR / "vyslovnost_cs.json"
+VZOR_SLOVA = re.compile(r"\w+", re.UNICODE)
+
+
+@functools.lru_cache(maxsize=1)
+def slovnik_cs() -> dict:
+    """Měkké ti/di/ni podle Wikislovníku: tvar slova -> tvar s háčkem.
+
+    Soubor vyrábí vyslovnost_wiki.py. Háček je jen tam, kde výslovnost ve
+    Wikislovníku měkké čtení potvrzuje, takže přejatá slova jako politika
+    nebo diplom zůstanou, jak jsou. Načítá se až při prvním použití -
+    pracovníci ho nepotřebují.
+    """
+    if not VYSLOVNOST_CS_PATH.exists():
+        return {}
+    data = json.loads(VYSLOVNOST_CS_PATH.read_text(encoding="utf-8"))
+    return data.get("nahrady") or {}
+
 
 def _sestav_vzor(nahrady: dict):
     """Jeden regulární výraz pro všechna pravidla naráz.
@@ -104,44 +123,72 @@ def _sestav_vzor(nahrady: dict):
 VZOR_VYSLOVNOSTI, MAPA_VYSLOVNOSTI = _sestav_vzor(VYSLOVNOST)
 
 
-def uprav_vyslovnost(text: str):
-    """Přepíše text podle slovníčku. Vrací (text, počet_náhrad)."""
-    if VZOR_VYSLOVNOSTI is None or not text:
-        return text, 0
-
-    pocet = 0
-
-    def nahrad(shoda):
-        nonlocal pocet
-        jmeno = shoda.lastgroup
-        if jmeno not in MAPA_VYSLOVNOSTI:
-            return shoda.group(0)
-        holy, cil, predpona = MAPA_VYSLOVNOSTI[jmeno]
-        nalezene = shoda.group(0)
-
-        if predpona:
-            zbytek = nalezene[len(holy):]
-            novy = (cil[:-1] if cil.endswith("*") else cil) + zbytek
-        else:
-            novy = cil
-
-        # zachovat velikost písmen originálu - celé verzálky se u nadpisů
-        # kapitol vyskytují běžně, tak ať se z nich nestane Ťichý
-        if len(nalezene) > 1 and nalezene.isupper():
-            novy = novy.upper()
-        elif nalezene[:1].isupper():
-            novy = novy[:1].upper() + novy[1:]
-        pocet += 1
-        return novy
-
-    return VZOR_VYSLOVNOSTI.sub(nahrad, text), pocet
+def _velikost_jako(vzor: str, novy: str) -> str:
+    """Přenese velikost písmen. Celé verzálky se u nadpisů kapitol vyskytují
+    běžně, tak ať se z nich nestane Ťichý."""
+    if len(vzor) > 1 and vzor.isupper():
+        return novy.upper()
+    if vzor[:1].isupper():
+        return novy[:1].upper() + novy[1:]
+    return novy
 
 
-def otisk_vyslovnosti() -> str:
-    """Otisk slovníčku - mění zvuk, takže patří do otisku rozdělané knihy."""
+def uprav_vyslovnost(text: str, jazyk: str = ""):
+    """Přepíše text podle slovníčků. Vrací (text, ručních_náhrad, slov_z_Wikislovníku).
+
+    Nejdřív ruční pravidla z vyslovnost.json - ta mají přednost. U české
+    knihy pak háčky z Wikislovníku. Slovo, které už přepsalo ruční pravidlo,
+    ve Wikislovníku nenajde, takže se nic neuplatní dvakrát.
+    """
+    if not text:
+        return text, 0, 0
+
+    rucne = 0
+    if VZOR_VYSLOVNOSTI is not None:
+        def nahrad(shoda):
+            nonlocal rucne
+            jmeno = shoda.lastgroup
+            if jmeno not in MAPA_VYSLOVNOSTI:
+                return shoda.group(0)
+            holy, cil, predpona = MAPA_VYSLOVNOSTI[jmeno]
+            nalezene = shoda.group(0)
+            if predpona:
+                zbytek = nalezene[len(holy):]
+                novy = (cil[:-1] if cil.endswith("*") else cil) + zbytek
+            else:
+                novy = cil
+            rucne += 1
+            return _velikost_jako(nalezene, novy)
+
+        text = VZOR_VYSLOVNOSTI.sub(nahrad, text)
+
+    z_wiki = 0
+    slovnik = slovnik_cs() if jazyk == "cs" else {}
+    if slovnik:
+        def po_slovech(shoda):
+            nonlocal z_wiki
+            slovo = shoda.group(0)
+            novy = slovnik.get(slovo.lower())
+            if novy is None:
+                return slovo
+            z_wiki += 1
+            return _velikost_jako(slovo, novy)
+
+        text = VZOR_SLOVA.sub(po_slovech, text)
+
+    return text, rucne, z_wiki
+
+
+def otisk_vyslovnosti(jazyk: str = "") -> str:
+    """Otisk slovníčků - mění zvuk, takže patří do otisku rozdělané knihy.
+
+    Wikislovník jen u české knihy. Otisk ostatních jazyků se tím nemění.
+    """
     import hashlib
 
     polozky = "|".join(f"{k}={v}" for k, v in sorted(VYSLOVNOST.items()))
+    if jazyk == "cs" and VYSLOVNOST_CS_PATH.exists():
+        polozky += "|cs=" + hashlib.sha256(VYSLOVNOST_CS_PATH.read_bytes()).hexdigest()
     return hashlib.sha256(polozky.encode("utf-8")).hexdigest()[:16]
 
 
@@ -894,7 +941,9 @@ def otisk_zadani(cesta_knihy: Path, p: dict, celkem_bloku: int) -> str:
     if p.get("rychly_dekoder"):
         h.update(b"rychly_dekoder=True")
     h.update(f"bloku={celkem_bloku}".encode("utf-8"))
-    h.update(otisk_vyslovnosti().encode("utf-8"))
+    # Klíč jazyka je "kod" nebo "kod|repo"
+    kod = (p.get("jazyk_textu") or "").split("|")[0]
+    h.update(otisk_vyslovnosti(kod).encode("utf-8"))
     ref = p.get("referencni_wav")
     if ref and Path(ref).exists():
         h.update(str(Path(ref).stat().st_mtime_ns).encode("utf-8"))
@@ -3087,11 +3136,13 @@ class Aplikace(tk.Tk):
             # se pak výstup rozpadne na soubory.
             self.kapitoly = []
             self.bloky = []
-            nahrazeno = 0
+            nahrazeno = z_wiki = 0
+            jazyk = self._kod_jazyka_textu()
             for i, kap in enumerate(kapitoly):
                 text = normalizuj_text(kap["text"])
-                text, kolik = uprav_vyslovnost(text)
+                text, kolik, kolik_wiki = uprav_vyslovnost(text, jazyk)
                 nahrazeno += kolik
+                z_wiki += kolik_wiki
                 if not text.strip():
                     continue
                 bloky = rozdel_na_bloky(text, max_znaku)
@@ -3116,6 +3167,8 @@ class Aplikace(tk.Tk):
                 self.log(T("log_kapitoly", len(self.kapitoly)))
             if nahrazeno:
                 self.log(T("log_vyslovnost", nahrazeno, len(VYSLOVNOST)))
+            if z_wiki:
+                self.log(T("log_vyslovnost_cs", z_wiki))
             self.log(T("log_ukazka_bloku", self.bloky[0][1][:120]))
         except Exception as chyba:
             self.bloky = []

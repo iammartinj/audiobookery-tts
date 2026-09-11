@@ -8,10 +8,19 @@ only. The pieces below carry their own terms.
 | Component | Licence | Location |
 |---|---|---|
 | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | SIL Open Font License 1.1 | `fonts/` — full text in [`fonts/OFL.txt`](fonts/OFL.txt) |
+| Czech pronunciation data, adapted from [Wikislovník](https://cs.wiktionary.org/) | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) | `vyslovnost_cs.json` |
 
 The font is redistributed under the OFL, which permits bundling provided the
 licence travels with it. Audiobookery loads it for its own process only, via
 `AddFontResourceEx` with `FR_PRIVATE`; nothing is installed into the system.
+
+`vyslovnost_cs.json` is adapted from pronunciation data in Wikislovník, the Czech
+Wiktionary, by its contributors, as extracted by [kaikki.org](https://kaikki.org/)
+with [wiktextract](https://github.com/tatuylonen/wiktextract). The adaptation keeps
+only the soft *ti/di/ni* readings and rewrites them with a háček;
+[`vyslovnost_wiki.py`](vyslovnost_wiki.py) records exactly how. The file is
+distributed under CC BY-SA 4.0, like its source — the MIT licence does not apply
+to it.
 
 ## Downloaded at runtime — not part of this repository
 

@@ -366,6 +366,17 @@ odstraňování není podporované použití tohoto projektu.
 
 Za to, co s nástrojem vyrobíte, autoři neodpovídají.
 
+## Výslovnost měkkého ti, di, ni
+
+Model občas přečte *tichý* jako *tychý*. U českých knih proto aplikace sama doplní
+háček do 33 118 tvarů slov, u kterých Wikislovník potvrzuje měkkou výslovnost —
+*ťichý, ďivadlo, ňikdo* — a přejatá slova jako *politika* nebo *diplom* nechá být.
+Slovník je v `vyslovnost_cs.json` a vyrábí ho `vyslovnost_wiki.py`; podrobnosti
+a měření jsou v anglickém README.
+
+Slova, která model přesto čte špatně, dopište do `vyslovnost.json`. Vaše pravidla
+se uplatní dřív a mají přednost. Data slovníku jsou pod licencí CC BY-SA 4.0.
+
 ## Použité modely a licence
 
 | Součást | Licence | Poznámka |
@@ -376,6 +387,7 @@ Za to, co s nástrojem vyrobíte, autoři neodpovídají.
 | [`ResembleAI/chatterbox-turbo`](https://huggingface.co/ResembleAI/chatterbox-turbo) | MIT | rychlý dekodér, stahuje se jen po zapnutí |
 | Jazykové checkpointy | viz karta každého modelu | komunitní práce, podmínky se liší |
 | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | OFL 1.1 | přibalené ve `fonts/`, viz `fonts/OFL.txt` |
+| Data výslovnosti z [Wikislovníku](https://cs.wiktionary.org/) | CC BY-SA 4.0 | přibalená jako `vyslovnost_cs.json` |
 
 V repozitáři nejsou žádné váhy modelů. Vše se stahuje z Hugging Face při prvním
 použití, za podmínek, které daný model nese.

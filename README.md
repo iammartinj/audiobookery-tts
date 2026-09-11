@@ -296,8 +296,45 @@ tichá, tiché, tichého, tichem* without listing every case.
 all read hard — trading an occasional error for a systematic one. Add only the
 words you actually hear going wrong.
 
-The dictionary is part of the resume fingerprint, so editing it stops a
-half-finished book from continuing with a different pronunciation.
+Both dictionaries are part of the resume fingerprint — the Czech one below only
+for Czech books — so changing either stops a half-finished book from continuing
+with a different pronunciation.
+
+### A Czech dictionary from Wiktionary
+
+For Czech books Audiobookery also applies
+[`vyslovnost_cs.json`](vyslovnost_cs.json): 33,118 word forms that get a háček
+where the soft reading is confirmed. It comes from Wikislovník, the Czech
+Wiktionary, which gives the pronunciation of its entries in IPA — and IPA does
+tell the two readings apart: *tichý* [cɪxiː], *politika* [pɔlɪtɪka].
+[`vyslovnost_wiki.py`](vyslovnost_wiki.py) aligns every *ti/di/ni* in the
+spelling with the consonant in the IPA and adds the háček only where the IPA
+says soft. Inflected forms inherit the reading from their headword, but only for
+the part of the word they share with it; reflexive verbs and forms negated with
+*ne-* are covered as well.
+
+The IPA turned out not to be equally reliable everywhere. Entries with a native
+speaker's recording are right, while rare entries without one are often
+transcribed naively from the spelling, loanwords included — *anestetický*
+[anɛstɛcɪtskiː]. Entries with a recording are therefore trusted fully; without
+one, only a soft ending is accepted, where grammar decides the reading
+(*poslední, spojení, ním, posadil*).
+
+| variant | forms | háček inside a loanword | coverage of a Czech novel |
+|---|---|---|---|
+| every entry | 62,455 | about 1,400 | 73 % |
+| entries with a recording only | 4,262 | 0 | 34 % |
+| **mixed — shipped** | **33,118** | **0** | **63 %** |
+
+Coverage is the share of words containing *ti/di/ni* that get rewritten; the
+remainder includes names and loanwords that should stay hard. Native words with a
+soft stem and no recording — *tiše, podíval, nikomu* — are not covered. If you
+hear one go wrong, add it to `vyslovnost.json`; your own rules run first and win.
+
+Compared by ear on the same sentences, the rewritten text read better. A háček
+does not change the length of a word, so block boundaries stay exactly where they
+were. The data is licensed CC BY-SA 4.0 and the file inherits that licence — see
+[NOTICE.md](NOTICE.md).
 
 ## Chapters and resuming
 
@@ -415,6 +452,7 @@ The authors of this tool are not responsible for what you make with it.
 | [`ResembleAI/chatterbox-turbo`](https://huggingface.co/ResembleAI/chatterbox-turbo) | MIT | fast decoder, downloaded only when switched on |
 | Language checkpoints | see each model card | community work, terms vary |
 | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | OFL 1.1 | bundled in `fonts/`, see `fonts/OFL.txt` |
+| Czech pronunciation data from [Wikislovník](https://cs.wiktionary.org/) | CC BY-SA 4.0 | bundled as `vyslovnost_cs.json` |
 
 No model weights are included in this repository. Everything downloads from
 Hugging Face on first use, under whatever terms that model carries. Full
@@ -427,7 +465,9 @@ audiobookery/
   audiobookery.py      # the whole application
   preklady.py          # interface strings (en / cs)
   modely.json          # language catalogue
-  vyslovnost.json      # pronunciation rewrites
+  vyslovnost.json      # your pronunciation rewrites
+  vyslovnost_cs.json   # soft ti/di/ni for Czech, from Wiktionary (CC BY-SA 4.0)
+  vyslovnost_wiki.py   # regenerates vyslovnost_cs.json
   run.bat              # install + launch
   requirements.txt
   fonts/               # bundled JetBrains Mono (OFL 1.1)
