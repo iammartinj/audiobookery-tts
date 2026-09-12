@@ -229,6 +229,7 @@ TEXTY = {
                          "Probíhá převod. Opravdu ukončit?\nRozpracovaný soubor se ještě korektně uzavře."),
     "dlg_chyba":        ("Error", "Chyba"),
     "dlg_slozka":       ("Could not open the folder:\n{0}", "Složku se nepodařilo otevřít:\n{0}"),
+    "err_spoustec":     ("{0} is not in PATH", "{0} není v PATH"),
     "dlg_vyber_knihu":  ("Select an e-book", "Vyberte e-knihu"),
     "dlg_vyber_hlas":   ("Select a reference voice recording", "Vyberte referenční nahrávku hlasu"),
     "dlg_vyber_slozku": ("Select the output folder", "Vyberte výstupní složku"),
