@@ -1487,6 +1487,42 @@ def uvolni_hooky_t3(model) -> int:
     return uklizeno
 
 
+def _opakovani_az_po_doceteni(puvodni):
+    """Obal AlignmentStreamAnalyzer.step, který mu token předá až po dočtení textu."""
+    @functools.wraps(puvodni)
+    def step(self, logits, next_token=None):
+        return puvodni(self, logits, next_token=next_token if self.complete else None)
+
+    step.audiobookery = True
+    return step
+
+
+def oprav_predcasny_konec() -> bool:
+    """Ať chatterbox neukončí řeč uprostřed textu kvůli dvěma stejným tokenům.
+
+    Analyzátor v chatterboxu 0.1.7 vynutí konec řeči, jakmile jsou dva
+    poslední řečové tokeny stejné - a to kdykoli, podmínka "až po dočtení
+    textu" je v kódu zakomentovaná. Dva stejné tokeny za sebou jsou přitom
+    běžné, třeba v delší pauze, takže model uřízne zbytek bloku. Opakování
+    se proto hlídá až po dočtení, jak zakomentovaná podmínka zamýšlela.
+
+    Naměřeno na 45 blocích Ovidia se stejným seedem: původně se konec
+    vynutil třikrát a pokaždé chyběla poslední věta (shoda přepisu 0,84 až
+    0,93). Po opravě se všechny tři dočetly (0,98 a 0,99), jinak se nezměnil
+    ani jeden blok. Úplné vypnutí hlídání dalo totéž.
+
+    Hlavní větev chatterboxu analyzátor v květnu 2026 odstranila, opravená
+    verze tedy nevyjde. Vrací, jestli je oprava na místě.
+    """
+    try:
+        from chatterbox.models.t3.inference.alignment_stream_analyzer import AlignmentStreamAnalyzer
+    except ImportError:
+        return False
+    if not getattr(AlignmentStreamAnalyzer.step, "audiobookery", False):
+        AlignmentStreamAnalyzer.step = _opakovani_az_po_doceteni(AlignmentStreamAnalyzer.step)
+    return True
+
+
 class TtsEngine:
     def __init__(self, log_fn):
         self.log = log_fn
@@ -1775,7 +1811,8 @@ class TtsEngine:
             temperature=float(temperature),
             min_p=float(min_p),
         )
-        # Obojí musí proběhnout před generate() - důvody jsou u obou funkcí
+        # Všechno musí proběhnout před generate() - důvody jsou u funkcí
+        oprav_predcasny_konec()
         uvolni_hooky_t3(self.model)
         self._priprav_hlas(referencni_wav, exaggeration)
 
@@ -2053,9 +2090,9 @@ REZERVA_ZA_KONCEM_S = 0.8
 # Slyšitelná řeč tak dlouho po bodu, kde text došel, je přídavek navíc
 # ("Prosím, to siká"). U zdravých bloků nejvýš 0,38 s, u vadných 1,6 a 1,9 s.
 MAX_RECI_ZA_KONCEM_S = 0.8
-# Tiché brblání uvnitř bloku. Přirozené pauzy trvaly do 1,5 s, blok, kde
-# model 6 s hučel mezi dvěma větami, se jinak ničím neprozradil.
-MAX_TICHO_UVNITR_S = 2.0
+# Tiché brblání uvnitř bloku. Přirozené pauzy trvaly až 2,2 s (dočtené bloky
+# se shodou přepisu 0,98), brblání 3,3 a 5,6 s - to se jinak ničím neprozradí.
+MAX_TICHO_UVNITR_S = 3.0
 
 
 def rozbor_reci(vzorky, sr: int):

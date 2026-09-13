@@ -222,14 +222,14 @@ block is generated again with a different seed when:
 - more than 1.6 s follows that point, or audible speech continues more than
   0.8 s past it — an added *to siká* after *Prosím*,
 - the text was never read to the end, so words are missing,
-- a quiet stretch inside the block lasts longer than 2 s.
+- a quiet stretch inside the block lasts longer than 3 s.
 
 If all three attempts are flawed, the least damaged one is kept, with a tail cut
 0.8 s after the text ended. A block is never dropped because of a tail.
 
 Calibrated on 58 blocks generated from the book the problem was reported in.
 Healthy blocks ran 0–1.48 s past the end of the text, audible speech at most
-0.38 s past it, and their pauses lasted up to 1.5 s. Of 41 ordinary generations
+0.38 s past it, and their pauses lasted up to 2.2 s. Of 41 ordinary generations
 the check flagged 4, and a transcription confirmed a real fault in every one: a
 missing *Ani zdaleka.*, a truncated second sentence, a mangled opening and a name
 repeated in a loop. Expect a conversion about a tenth longer.
@@ -238,6 +238,17 @@ The previous guard allowed 8 characters per second plus 3 s. Across 612 blocks
 of ten chapters it never fired once. It remains only as a fallback for models
 without the analyzer, tightened to 10 characters per second — Czech reads at
 13.5.
+
+**A bug in Chatterbox that cut sentences off.** Chatterbox 0.1.7 forces the end
+of speech as soon as the last two speech tokens are identical — at any point,
+because the condition "only after the text is read" is commented out in its
+code. Two identical tokens in a row are ordinary, in a longer pause for
+instance, so the rest of the block was lost. Audiobookery now lets that rule
+apply only once the text has been read. On 45 blocks generated with the same
+seeds, the end was forced three times and each time the last sentence was
+missing (transcription match 0.84–0.93). With the fix all three were read to the
+end (0.98–0.99) and no other block changed. Chatterbox's main branch has since
+removed the analyzer altogether, so there is no fixed release to wait for.
 
 ### Transcription check
 

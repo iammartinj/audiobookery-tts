@@ -394,13 +394,22 @@ znovu s jiným seedem, když:
 - za bodem, kde text došel, následuje víc než 1,6 s, nebo je víc než 0,8 s za
   ním slyšet řeč,
 - model text nedočetl do konce,
-- uvnitř bloku je tiché brblání delší než 2 s.
+- uvnitř bloku je tiché brblání delší než 3 s.
 
 Když jsou vadné všechny tři pokusy, zůstane ten nejméně poškozený a ocas se
 usekne 0,8 s za koncem textu. Kalibrováno na 58 blocích z nahlášené knihy: ze 41
 běžných generování kontrola označila 4 a přepis u každého potvrdil skutečnou
 chybu — chybějící „Ani zdaleka.", useknutou větu, zkomolený začátek a jméno
 opakované ve smyčce. Převod se tím prodlouží zhruba o desetinu.
+
+**Chyba v chatterboxu, která usekávala věty.** Chatterbox 0.1.7 vynutí konec
+řeči, jakmile jsou dva poslední řečové tokeny stejné — kdykoli, podmínka „až po
+dočtení textu" je v jeho kódu zakomentovaná. Dva stejné tokeny za sebou jsou
+přitom běžné, třeba v delší pauze, a zbytek bloku se ztratil. Aplikace teď to
+pravidlo nechá platit až po dočtení. Na 45 blocích se stejnými seedy se konec
+vynutil třikrát a pokaždé chyběla poslední věta (shoda přepisu 0,84–0,93). Po
+opravě se všechny tři dočetly (0,98–0,99) a jiný blok se nezměnil. Hlavní větev
+chatterboxu mezitím analyzátor úplně odstranila, opravené vydání tedy nepřijde.
 
 **Kontrola přepisem** (pokročilé nastavení, poprvé stáhne 1,6 GB). Když jsou
 vadné všechny tři pokusy, Whisper je přepíše a vybere ten nejbližší textu. Běží
