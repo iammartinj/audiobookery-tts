@@ -1,9 +1,12 @@
 # Základní závislosti aplikace.
 # POZOR: torch se instaluje zvlášť (CUDA build) - viz spustit.bat / README.md
 
-# Verze 0.1.7+ je nutna: starsi vydani zavisi na balicku 'pkuseg',
-# ktery se na Windows musi kompilovat ze zdroje a instalace na nem spadne.
-chatterbox-tts>=0.1.7
+# Verze zamcena na 0.1.7. Starsi vydani zavisi na balicku 'pkuseg', ktery
+# se na Windows musi kompilovat ze zdroje a instalace na nem spadne. Vyvojova
+# vetev chatterboxu uz nema analyzator zarovnani, na kterem stoji kontrola
+# vadnych bloku i oprava predcasneho konce reci - novejsi vydani by je
+# potichu vypnulo.
+chatterbox-tts==0.1.7
 
 # Extrakce textu z e-knih
 ebooklib>=0.18

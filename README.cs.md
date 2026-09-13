@@ -326,7 +326,10 @@ které ale ve venv od `uv` chybí a od verze 81 už `pkg_resources` neobsahuje.
 **Instalace spadne na `pkuseg` / `No module named 'numpy'`** — resolver sáhl po
 staré verzi chatterboxu (0.1.3), která závisí na balíku `pkuseg` a ten se na
 Windows musí kompilovat ze zdroje. Proto je v `requirements.txt`
-`chatterbox-tts>=0.1.7` — novější vydání používá hotové kolo `spacy-pkuseg`.
+`chatterbox-tts==0.1.7` — toto vydání používá hotové kolo `spacy-pkuseg`.
+Verze je zamčená přesně, ne jako minimum: vývojová větev chatterboxu už nemá
+analyzátor zarovnání, na kterém stojí kontrola vadných bloků i oprava
+usekávání vět, a novější vydání by je potichu vypnulo.
 
 **Stahuje se `spacy_ontonotes.zip` (34 MB) do `C:\Users\<vy>\.pkuseg`** — to je
 čínský segmentátor, který si tokenizer inicializuje bez ohledu na zvolený jazyk.

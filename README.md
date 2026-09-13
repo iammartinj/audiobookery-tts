@@ -613,7 +613,10 @@ removed in version 81. Hence the `setuptools>=70,<81` pin.
 
 **Install fails on `pkuseg`** — the resolver picked chatterbox-tts 0.1.3, which
 needs a package that must be compiled on Windows. `requirements.txt` pins
-`>=0.1.7`, which uses a prebuilt wheel.
+`==0.1.7`, which uses a prebuilt wheel. It is pinned exactly rather than as a
+minimum: Chatterbox's development branch has dropped the alignment analyzer
+that the block checks and the sentence cut-off fix rely on, so a newer release
+would switch them off without a word.
 
 **`CUDA out of memory`** — lower *chars per block* to about 120, or switch the
 device to `cpu`.
