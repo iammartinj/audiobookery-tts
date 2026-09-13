@@ -8,7 +8,10 @@ no cloud service, no account, and no per-character billing. Built on
 
 *[Česká verze / Czech version](README.cs.md)*
 
-![Audiobookery](docs/screenshot.png)
+<p>
+  <img src="docs/screenshot.png" alt="Audiobookery converting a book, dark scheme" width="49%">
+  <img src="docs/screenshot-light.png" alt="Audiobookery converting a book, light scheme" width="49%">
+</p>
 
 ---
 
