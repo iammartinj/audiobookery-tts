@@ -192,6 +192,30 @@ def otisk_vyslovnosti(jazyk: str = "") -> str:
     return hashlib.sha256(polozky.encode("utf-8")).hexdigest()[:16]
 
 
+def otevri_v_systemu(cesta):
+    """Otevře soubor nebo složku tím, čím je systém otevírá.
+
+    os.startfile() je jen na Windows - na macOS a Linuxu ta funkce vůbec
+    neexistuje, takže volání spadne na AttributeError. Jinde se to musí
+    předat systémovému spouštěči: 'open' na macOS, 'xdg-open' na Linuxu.
+
+    Spouštěč se nečeká - 'open' se vrátí hned, ale některé implementace
+    'xdg-open' drží proces, dokud aplikace neskončí. Když spouštěč není
+    v PATH, vyhodíme výjimku, ať to volající umí ohlásit; tichý neúspěch
+    by vypadal jako že se nestalo nic.
+    """
+    cesta = str(cesta)
+    if sys.platform == "win32":
+        os.startfile(cesta)
+        return
+
+    spoustec = "open" if sys.platform == "darwin" else "xdg-open"
+    if shutil.which(spoustec) is None:
+        raise RuntimeError(T("err_spoustec", spoustec))
+    subprocess.Popen([spoustec, cesta],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 KATALOG_PATH = APP_DIR / "modely.json"
 
 
@@ -5057,7 +5081,7 @@ class Aplikace(tk.Tk):
         slozka = Path(self.var_vystup_slozka.get())
         slozka.mkdir(parents=True, exist_ok=True)
         try:
-            os.startfile(str(slozka))
+            otevri_v_systemu(slozka)
         except Exception as chyba:
             messagebox.showerror(T("dlg_chyba"), T("dlg_slozka", chyba))
 
@@ -5083,7 +5107,7 @@ class Aplikace(tk.Tk):
         """Krátká ukázka (test hlasu, oprava úseku) přímo na zvukovou kartu."""
         if not Prehravac.dostupny():
             try:
-                os.startfile(str(cesta))
+                otevri_v_systemu(cesta)
             except Exception:
                 self.log(T("log_ulozen", cesta))
             return
