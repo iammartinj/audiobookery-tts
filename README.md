@@ -206,6 +206,54 @@ Verified against the recording the problem was reported in: of 1.30 s of real
 murmur, 0.26 s remains. Across eight freshly generated blocks, seven were left
 untouched and none lost an audible sample.
 
+### When the model does not stop, or stops too early
+
+Edge trimming handles a second of murmur. It cannot help when the model loses
+its place in the text. Chatterbox forbids the end-of-speech token until its
+attention reaches the end of the text, so once that alignment is lost it keeps
+generating up to its 1000-token cap. In one reported chapter a 192-character
+block ran **25.5 s**, the last 13 s of it murmur and hiss at −25 to −35 dBFS —
+loud enough, and with enough high frequencies, to pass for speech.
+
+After every block Audiobookery reads the model's own alignment analyzer, which
+records the frame where the text was read to the end (one frame is 40 ms). The
+block is generated again with a different seed when:
+
+- more than 1.6 s follows that point, or audible speech continues more than
+  0.8 s past it — an added *to siká* after *Prosím*,
+- the text was never read to the end, so words are missing,
+- a quiet stretch inside the block lasts longer than 2 s.
+
+If all three attempts are flawed, the least damaged one is kept, with a tail cut
+0.8 s after the text ended. A block is never dropped because of a tail.
+
+Calibrated on 58 blocks generated from the book the problem was reported in.
+Healthy blocks ran 0–1.48 s past the end of the text, audible speech at most
+0.38 s past it, and their pauses lasted up to 1.5 s. Of 41 ordinary generations
+the check flagged 4, and a transcription confirmed a real fault in every one: a
+missing *Ani zdaleka.*, a truncated second sentence, a mangled opening and a name
+repeated in a loop. Expect a conversion about a tenth longer.
+
+The previous guard allowed 8 characters per second plus 3 s. Across 612 blocks
+of ten chapters it never fired once. It remains only as a fallback for models
+without the analyzer, tightened to 10 characters per second — Czech reads at
+13.5.
+
+### Transcription check
+
+Optional, under *advanced settings*. When every attempt at a block is flawed,
+Whisper (`openai/whisper-large-v3-turbo`, 1.6 GB on first use) transcribes each
+one and the attempt closest to the text is kept. It runs on the GPU when there
+is room next to the voice model, otherwise on the CPU, about 9 s per block on a
+Ryzen 9 3950X. It only runs where all attempts failed, so it costs next to
+nothing.
+
+It does not find mispronunciations. Whisper's language model smooths over a
+single wrong sound: *pšipomínal* comes back as *připomínal*. What it tells apart
+reliably is an attempt that is complete from one that lost a sentence. For a
+slip like that, fix the passage by hand, as described under
+[Chapters and resuming](#chapters-and-resuming).
+
 ### Removing clicks from pauses
 
 Audiobookery attenuates short impulses that appear in silent stretches. It is
@@ -409,6 +457,26 @@ place. Only what fails even then is left out, and every such passage is listed
 with its block and chapter in `<book> - missing text.txt` next to the output
 (`<book> - chybějící text.txt` with the Czech interface).
 
+**Fixing a passage.** *fix a passage*, next to *open output*, works on a finished
+file. Enter the time where you heard the problem; the block is found and its text
+shown — after the pronunciation rewrites, so Czech *první* appears as *prvňí*.
+The text can be edited and is read exactly as
+written, so a stubborn word can be respelled for this one take. *generate again* makes a new take with the
+book's voice settings and plays it, *replace in file* swaps it in. MP3 keeps its
+tags and cover and is re-encoded once; the previous version is backed up to
+`temp/zalohy_oprav/`. A chapter still being written by an interrupted conversion
+is not offered, because resuming cuts it to the recorded length.
+
+Every conversion writes `<book>.blocks.jsonl` next to the output with the
+position of each block. Files made before 1.11 have no map. Load the same book
+with the same characters per block and pause, and the blocks are found from the
+silence inserted between them — on all ten chapters of the reported book the
+boundaries matched exactly.
+
+Verified on that book's first chapter: the dialog found block 8 at 1:25, a new
+take of 16.7 s replaced the 25.5 s one, the next block starts exactly where its
+pause ends, and tags and cover survived.
+
 ## Languages
 
 The synthesis language is independent of the interface language: a Czech
@@ -490,6 +558,7 @@ The authors of this tool are not responsible for what you make with it.
 | [Chatterbox TTS](https://github.com/resemble-ai/chatterbox) | MIT | the engine |
 | [`ResembleAI/chatterbox`](https://huggingface.co/ResembleAI/chatterbox) | see model card | base weights, downloaded at runtime |
 | [`ResembleAI/chatterbox-turbo`](https://huggingface.co/ResembleAI/chatterbox-turbo) | MIT | fast decoder, downloaded only when switched on |
+| [`openai/whisper-large-v3-turbo`](https://huggingface.co/openai/whisper-large-v3-turbo) | MIT | transcription check, downloaded only when switched on |
 | Language checkpoints | see each model card | community work, terms vary |
 | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | OFL 1.1 | bundled in `fonts/`, see `fonts/OFL.txt` |
 | Czech pronunciation data from [Wikislovník](https://cs.wiktionary.org/) | CC BY-SA 4.0 | bundled as `vyslovnost_cs.json` |

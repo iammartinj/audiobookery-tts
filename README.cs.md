@@ -171,6 +171,7 @@ nahrávky — bývá tam znělka nebo ohlášení titulu jiným hlasem.
 | Seed | 0 | 0 = náhodný. Nenulová hodnota dělá výsledek reprodukovatelný. |
 | Zařízení | auto | `auto` zvolí CUDA, pokud je dostupná. |
 | Rychlý dekodér | vypnuto | Destilovaný dekodér z Chatterbox Turbo. Na 2080 Ti převod zrychlí zhruba o 11 %, zvuk zůstává obdobný. Při prvním zapnutí stáhne 1,1 GB. |
+| Kontrola přepisem | vypnuto | U bloku, kde selžou všechny tři pokusy, vybere přes Whisper ten nejbližší textu. Při prvním zapnutí stáhne 1,6 GB. |
 
 ## Jazyk knihy a katalog modelů
 
@@ -379,6 +380,47 @@ a měření jsou v anglickém README.
 Slova, která model přesto čte špatně, dopište do `vyslovnost.json`. Vaše pravidla
 se uplatní dřív a mají přednost. Data slovníku jsou pod licencí CC BY-SA 4.0.
 
+## Vadné bloky a oprava úseku
+
+Model občas po dočtení věty nepřestane a pauzu vyplní desítkou sekund hučení,
+jindy kus textu vynechá. Chatterbox zakazuje token konce řeči, dokud pozornost
+nedojde na konec textu — když se zarovnání ztratí, generuje až do stropu 1000
+tokenů. V nahlášené kapitole měl blok o 192 znacích **25,5 s**, z toho posledních
+13 s hučení a šumu.
+
+Aplikace po každém bloku přečte analyzátor zarovnání modelu a blok vygeneruje
+znovu s jiným seedem, když:
+
+- za bodem, kde text došel, následuje víc než 1,6 s, nebo je víc než 0,8 s za
+  ním slyšet řeč,
+- model text nedočetl do konce,
+- uvnitř bloku je tiché brblání delší než 2 s.
+
+Když jsou vadné všechny tři pokusy, zůstane ten nejméně poškozený a ocas se
+usekne 0,8 s za koncem textu. Kalibrováno na 58 blocích z nahlášené knihy: ze 41
+běžných generování kontrola označila 4 a přepis u každého potvrdil skutečnou
+chybu — chybějící „Ani zdaleka.", useknutou větu, zkomolený začátek a jméno
+opakované ve smyčce. Převod se tím prodlouží zhruba o desetinu.
+
+**Kontrola přepisem** (pokročilé nastavení, poprvé stáhne 1,6 GB). Když jsou
+vadné všechny tři pokusy, Whisper je přepíše a vybere ten nejbližší textu. Běží
+na kartě, když je vedle modelu hlasu místo, jinak na procesoru. Přeřek v jedné
+hlásce nenajde — „pšipomínal" přepíše jako „připomínal".
+
+**Oprava úseku.** Tlačítko *opravit úsek* otevře dialog nad hotovým souborem.
+Zadáte čas, kde jste chybu slyšeli, aplikace najde blok a ukáže jeho text — už
+po úpravách výslovnosti, takže „první" se tam objeví jako „prvňí". Text jde
+upravit a přečte se přesně tak, jak je napsaný. *Vygenerovat znovu* udělá
+nový pokus hlasem knihy a přehraje ho, *nahradit v souboru* ho vymění. MP3 si
+ponechá ID3 i obálku a jednou se překóduje, předchozí verze se zazálohuje do
+`temp/zalohy_oprav/`. Rozepsaná kapitola přerušeného převodu se nenabízí —
+navázání by ji usekl na uloženou délku.
+
+Převod ukládá vedle výstupu `<kniha>.blocks.jsonl` s polohou každého bloku.
+Soubory z doby před 1.11 mapu nemají: načtěte stejnou knihu se stejným počtem
+znaků na blok a pauzou a bloky se dohledají podle ticha mezi nimi. Na všech
+deseti kapitolách nahlášené knihy hranice seděly přesně.
+
 ## Použité modely a licence
 
 | Součást | Licence | Poznámka |
@@ -387,6 +429,7 @@ se uplatní dřív a mají přednost. Data slovníku jsou pod licencí CC BY-SA 
 | [Chatterbox TTS](https://github.com/resemble-ai/chatterbox) | MIT | vlastní engine |
 | [`ResembleAI/chatterbox`](https://huggingface.co/ResembleAI/chatterbox) | viz karta modelu | základní váhy, stahují se za běhu |
 | [`ResembleAI/chatterbox-turbo`](https://huggingface.co/ResembleAI/chatterbox-turbo) | MIT | rychlý dekodér, stahuje se jen po zapnutí |
+| [`openai/whisper-large-v3-turbo`](https://huggingface.co/openai/whisper-large-v3-turbo) | MIT | kontrola přepisem, stahuje se jen po zapnutí |
 | Jazykové checkpointy | viz karta každého modelu | komunitní práce, podmínky se liší |
 | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | OFL 1.1 | přibalené ve `fonts/`, viz `fonts/OFL.txt` |
 | Data výslovnosti z [Wikislovníku](https://cs.wiktionary.org/) | CC BY-SA 4.0 | přibalená jako `vyslovnost_cs.json` |

@@ -29,6 +29,7 @@ to it.
 | [Chatterbox TTS](https://github.com/resemble-ai/chatterbox) | MIT | the synthesis engine, installed via pip |
 | [`ResembleAI/chatterbox`](https://huggingface.co/ResembleAI/chatterbox) | see model card | base weights, ~3 GB |
 | [`ResembleAI/chatterbox-turbo`](https://huggingface.co/ResembleAI/chatterbox-turbo) | MIT | distilled decoder `s3gen_meanflow.safetensors`, ~1.1 GB, only when *fast decoder* is on |
+| [`openai/whisper-large-v3-turbo`](https://huggingface.co/openai/whisper-large-v3-turbo) | MIT | speech recognition for the *transcription check*, ~1.6 GB, only when it is on |
 | [`Thomcles/Chatterbox-TTS-Czech`](https://huggingface.co/Thomcles/Chatterbox-TTS-Czech) | see model card | Czech checkpoint, access-gated |
 | [`pekiskol/chatterbox-tts-slovak`](https://huggingface.co/pekiskol/chatterbox-tts-slovak) | see model card | Slovak checkpoint |
 | [`ResembleAI/Chatterbox-Multilingual-pt-br`](https://huggingface.co/ResembleAI/Chatterbox-Multilingual-pt-br) | see model card | Brazilian Portuguese |

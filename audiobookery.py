@@ -252,6 +252,7 @@ DEFAULT_CONFIG = {
     "odstranit_lupance": True,
     "orezat_okraje": True,
     "rychly_dekoder": False,
+    "kontrola_asr": False,
     # Sbalené sekce okna - na nízkém monitoru se bez toho nevejde spodek
     "sbalene_sekce": {"poslech": False, "pokrocile": True, "prubeh": False},
     "seed": 0,
@@ -926,7 +927,7 @@ NASTAVENI_HLASU = ("jazyk_textu", "referencni_wav", "exaggeration", "cfg_weight"
                    "temperature", "min_p", "seed", "pauza_ms", "format", "bitrate")
 # Opravy. Změna jen zlepší zbytek knihy, takže navázání neblokuje - do logu
 # se ale vypíše. Ke slovníčkům se do stavu přidává i otisk jejich obsahu.
-NASTAVENI_OPRAV = ("odstranit_lupance", "orezat_okraje", "rychly_dekoder")
+NASTAVENI_OPRAV = ("odstranit_lupance", "orezat_okraje", "rychly_dekoder", "kontrola_asr")
 
 
 def otisk_hlasu(cesta_knihy: Path, p: dict, bloky) -> str:
@@ -2032,10 +2033,170 @@ def orizni_okraje(vzorky, sr: int, zapnuto: bool = True):
 MIN_CAST_ZNAKU = 40
 
 
+# --------------------------------------------------------------------------
+#  Kontrola zarovnání - model, který nepřestal mluvit
+# --------------------------------------------------------------------------
+# T3 v chatterboxu zakazuje token konce řeči, dokud pozornost nedojde na konec
+# textu. Když se zarovnání cestou ztratí, model nemá jak přestat a generuje
+# dál až do stropu 1000 tokenů - vznikne až dvacet sekund hučení a šumu.
+# Hlasitostí ani spektrem se to od řeči oddělit nedá (naměřeno -25 až -35 dBFS
+# a vysoké složky 0,1 až 0,9), analyzátor zarovnání ale ví, kdy text došel.
+# Jeden snímek analyzátoru je jeden řečový token, tedy 40 ms zvuku.
+SNIMKU_ZA_SEKUNDU = 25.0
+# Přesah za bodem, kde text došel. Nad ním jde o halucinaci. Naměřeno na 41
+# blocích: zdravé 0 až 1,48 s, blok s 28 s zvuku pro 185 znaků 1,88 s.
+MAX_PRESAH_S = 1.6
+# Kolik se při uříznutí nechá za bodem, kde text došel - analyzátor hlásí
+# konec o tři textové tokeny dřív. Slyšitelná řeč končila 0,5 s před ním
+# až 0,4 s za ním.
+REZERVA_ZA_KONCEM_S = 0.8
+# Slyšitelná řeč tak dlouho po bodu, kde text došel, je přídavek navíc
+# ("Prosím, to siká"). U zdravých bloků nejvýš 0,38 s, u vadných 1,6 a 1,9 s.
+MAX_RECI_ZA_KONCEM_S = 0.8
+# Tiché brblání uvnitř bloku. Přirozené pauzy trvaly do 1,5 s, blok, kde
+# model 6 s hučel mezi dvěma větami, se jinak ničím neprozradil.
+MAX_TICHO_UVNITR_S = 2.0
+
+
+def rozbor_reci(vzorky, sr: int):
+    """Vrátí (kde končí slyšitelná řeč ve vzorcích, nejdelší tichý úsek uvnitř v s).
+
+    Řeč je rámec nad 35 % hlasitosti 90. percentilu, ticho pod 10 %.
+    """
+    import numpy as np
+
+    d = np.asarray(vzorky, dtype="float64").reshape(-1)
+    krok, okno = max(1, int(sr * 0.02)), max(2, int(sr * 0.04))
+    if len(d) < okno * 2:
+        return len(d), 0.0
+    kumul = np.concatenate(([0.0], np.cumsum(d * d)))
+    zacatky = np.arange(0, len(d) - okno + 1, krok)
+    rms = np.sqrt((kumul[zacatky + okno] - kumul[zacatky]) / okno)
+    uroven = float(np.percentile(rms, 90))
+    if uroven <= 0:
+        return 0, 0.0
+    rec = np.flatnonzero(rms > uroven * 0.35)
+    if not len(rec):
+        return 0, 0.0
+    tiche = (rms[rec[0]:rec[-1] + 1] < uroven * 0.10).astype("int8")
+    zmeny = np.diff(np.concatenate(([0], tiche, [0])))
+    delky = np.flatnonzero(zmeny == -1) - np.flatnonzero(zmeny == 1)
+    nejdelsi = float(delky.max()) * krok / sr if len(delky) else 0.0
+    return int(zacatky[rec[-1]] + okno), nejdelsi
+
+
+def stav_zarovnani(engine):
+    """Kde v posledním generování došel text: (snímek, snímků celkem).
+
+    Snímek je None, když model text nedočetl. (None, 0) znamená, že
+    analyzátor není - anglický model nebo jiný build chatterboxu.
+    """
+    t3 = getattr(getattr(engine, "model", None), "t3", None)
+    analyzator = getattr(getattr(t3, "patched_model", None), "alignment_stream_analyzer", None)
+    if analyzator is None:
+        return None, 0
+    return analyzator.completed_at, int(analyzator.alignment.shape[0])
+
+
+def posud_zarovnani(dosel, snimku: int, pocet_vzorku: int, konec_reci: int = None):
+    """Vrátí (vada, kolik vzorků ponechat).
+
+    vada: "" v pořádku, "ocas" = po dočtení pokračoval (uříznout jde),
+    "nedocteno" = text nedošel do konce, takže něco chybí. konec_reci je
+    vzorek, kde končí slyšitelná řeč (z rozbor_reci).
+    """
+    if snimku <= 0:
+        return "", pocet_vzorku
+    if dosel is None:
+        return "nedocteno", pocet_vzorku
+    presah = (snimku - dosel) / SNIMKU_ZA_SEKUNDU
+    rec_za_koncem = (konec_reci * snimku / float(pocet_vzorku) - dosel) / SNIMKU_ZA_SEKUNDU \
+        if konec_reci is not None and pocet_vzorku else 0.0
+    if presah <= MAX_PRESAH_S and rec_za_koncem <= MAX_RECI_ZA_KONCEM_S:
+        return "", pocet_vzorku
+    konec = (dosel + REZERVA_ZA_KONCEM_S * SNIMKU_ZA_SEKUNDU) / float(snimku)
+    return "ocas", int(pocet_vzorku * min(1.0, konec))
+
+
+# --------------------------------------------------------------------------
+#  Kontrola přepisem - výběr nejlepšího pokusu u podezřelého bloku
+# --------------------------------------------------------------------------
+# Běží jen tam, kde kontrola zarovnání něco našla, tedy asi u procenta bloků.
+# Whisper má silný jazykový model a přeřek v jedné hlásce zahladí, takže se
+# nehodí na hledání chyb - mezi pokusy o týž text ale pozná, který je kompletní.
+ASR_REPO = "openai/whisper-large-v3-turbo"
+ASR_GB = 1.6
+_asr = {}          # v každém procesu se načte nejvýš jednou
+
+
+def asr_stazeny() -> bool:
+    slozka = CACHE_DIR / "hub" / ("models--" + ASR_REPO.replace("/", "--"))
+    return slozka.is_dir() and any(slozka.rglob("*.safetensors"))
+
+
+def _nacti_asr(log):
+    if _asr:
+        return _asr
+    import torch
+    from transformers import WhisperForConditionalGeneration, WhisperProcessor
+
+    if not asr_stazeny():
+        log(T("log_asr_stahuji", ASR_GB))
+    # Na kartu jen tehdy, když vedle modelu hlasu zbývá místo. Jinak na
+    # procesor - u procenta bloků je těch pár sekund navíc jedno.
+    zarizeni = "cuda" if torch.cuda.is_available() and volna_vram_gb() > ASR_GB + 1.0 else "cpu"
+    typ = torch.float16 if zarizeni == "cuda" else torch.float32
+    procesor = WhisperProcessor.from_pretrained(ASR_REPO)
+    model = WhisperForConditionalGeneration.from_pretrained(ASR_REPO, dtype=typ).to(zarizeni).eval()
+    _asr.update(procesor=procesor, model=model, zarizeni=zarizeni, typ=typ)
+    log(T("log_asr_nacten", zarizeni))
+    return _asr
+
+
+def prepis_reci(vzorky, sr: int, jazyk: str, log) -> str:
+    import numpy as np
+    import torch
+    import torchaudio
+
+    a = _nacti_asr(log)
+    zvuk = torch.from_numpy(np.asarray(vzorky, dtype="float32").reshape(-1))
+    zvuk = torchaudio.functional.resample(zvuk, sr, 16000).numpy()
+    vstup = a["procesor"](zvuk, sampling_rate=16000, return_tensors="pt")
+    with torch.inference_mode():
+        ids = a["model"].generate(vstup.input_features.to(a["zarizeni"], a["typ"]),
+                                  language=jazyk or None, task="transcribe")
+    return a["procesor"].batch_decode(ids, skip_special_tokens=True)[0]
+
+
+def shoda_textu(ocekavany: str, prepsany: str) -> float:
+    """0 až 1, jak moc přepis odpovídá textu. Jen písmena a číslice, bez velikosti."""
+    import difflib
+
+    def jen_slova(t):
+        return " ".join(re.findall(r"\w+", t.lower()))
+
+    return difflib.SequenceMatcher(None, jen_slova(ocekavany), jen_slova(prepsany),
+                                   autojunk=False).ratio()
+
+
 def _generuj_jednou(engine, text: str, p: dict, index: int, celkem: int, log):
-    """Až tři pokusy o jeden kus textu; hlídá halucinační smyčky. Vrátí vzorky, nebo None."""
-    # Hrubý horní odhad délky: české čtení jede kolem 12-16 znaků/s
-    max_delka = len(text) / 8.0 + 3.0
+    """Až tři pokusy o jeden kus textu. Vrátí vzorky, nebo None.
+
+    Čistý pokus se vezme hned. Když kontrola zarovnání najde vadu, zkusí se
+    to znovu s jiným seedem. Když jsou vadné všechny tři, vezme se ten
+    nejlepší - s kontrolou přepisem ten nejbližší textu, jinak ten, kterému
+    šel jen uříznout ocas. Blok se tak kvůli ocasu nikdy nezahodí.
+    """
+    kandidati = []                  # (vzorky, vada)
+    kontrola = bool(p.get("kontrola_asr"))
+    jazyk = (p.get("jazyk_textu") or "").split("|")[0]
+
+    def skore(vzorky):
+        try:
+            return shoda_textu(text, prepis_reci(vzorky, engine.sr, jazyk, log))
+        except Exception as chyba:
+            log(T("log_asr_chyba", chyba))
+            return 0.0
 
     for pokus in range(1, 4):
         try:
@@ -2045,13 +2206,29 @@ def _generuj_jednou(engine, text: str, p: dict, index: int, celkem: int, log):
                                     p["cfg_weight"], p["temperature"],
                                     p.get("min_p", 0.05))
             delka = len(vzorky) / float(engine.sr)
-
-            if delka > max_delka and pokus < 3:
-                log(T("log_dlouhy", index, celkem, delka, len(text)))
-                continue
             if delka < 0.05:
                 log(T("log_prazdny", index, celkem))
                 continue
+
+            dosel, snimku = stav_zarovnani(engine)
+            konec_reci, ticho = rozbor_reci(vzorky, engine.sr)
+            if snimku:
+                vada, ponechat = posud_zarovnani(dosel, snimku, len(vzorky), konec_reci)
+            else:
+                # Bez analyzátoru zbývá odhad z délky: čte se 13,5 znaku za sekundu
+                vada = "dlouhy" if delka > len(text) / 10.0 + 3.0 else ""
+                ponechat = len(vzorky)
+            if not vada and ticho > MAX_TICHO_UVNITR_S:
+                vada = "ticho"
+            if vada == "ocas":
+                log(T("log_ocas", index, celkem, (len(vzorky) - ponechat) / float(engine.sr)))
+                vzorky = vzorky[:ponechat]
+            elif vada == "nedocteno":
+                log(T("log_nedocteno", index, celkem))
+            elif vada == "ticho":
+                log(T("log_ticho", index, celkem, ticho))
+            elif vada == "dlouhy":
+                log(T("log_dlouhy", index, celkem, delka, len(text)))
 
             vzorky, orez = orizni_okraje(vzorky, engine.sr,
                                          p.get("orezat_okraje", True))
@@ -2061,7 +2238,10 @@ def _generuj_jednou(engine, text: str, p: dict, index: int, celkem: int, log):
                                                p.get("odstranit_lupance", True))
             if ztlumeno:
                 log(T("log_lupance", ztlumeno, index, celkem))
-            return vzorky
+
+            if not vada:
+                return vzorky
+            kandidati.append((vzorky, vada))
         except Exception as chyba:
             log(T("log_pokus", index, celkem, pokus, chyba))
             try:
@@ -2071,7 +2251,17 @@ def _generuj_jednou(engine, text: str, p: dict, index: int, celkem: int, log):
             except Exception:
                 pass
             time.sleep(0.5)
-    return None
+
+    if not kandidati:
+        return None
+    if kontrola and len(kandidati) > 1:
+        body = [skore(v) for v, _ in kandidati]
+        nejlepsi = max(range(len(kandidati)), key=lambda i: body[i])
+        log(T("log_asr_vyber", index, celkem, nejlepsi + 1, len(kandidati), body[nejlepsi]))
+        return kandidati[nejlepsi][0]
+    # Bez přepisu: čistý pokus, jinak uříznutý ocas, jinak poslední
+    poradi = {"": 0, "ocas": 1, "dlouhy": 2, "nedocteno": 3}
+    return min(reversed(kandidati), key=lambda k: poradi[k[1]])[0]
 
 
 def generuj_blok(engine, blok: str, p: dict, index: int, celkem: int, log, _hloubka: int = 0):
@@ -2223,6 +2413,213 @@ class Pool:
 #  GUI
 # ==========================================================================
 
+# ==========================================================================
+#  Oprava jednoho úseku v hotové nahrávce
+# ==========================================================================
+
+def nazev_souboru_kapitoly(kap_i: int, nazev: str) -> str:
+    """Jméno souboru kapitoly bez přípony, stejně pro převod i pro opravu."""
+    nazev = re.sub(ZAKAZANE_ZNAKY, "", (nazev or "").strip())[:60].strip(" .")
+    return "{:02d}".format(kap_i + 1) + (" - " + nazev if nazev else "")
+
+
+class MapaBloku:
+    """Kde v souborech který blok leží. Řádek JSON na blok, jen se připisuje.
+
+    Připisování nestojí nic ani u knihy o pěti tisících blocích. Po přerušení
+    a navázání se bloky generují znovu - platí pak poslední zápis.
+    """
+
+    PRIPONA = ".blocks.jsonl"
+
+    def __init__(self, cesta: Path):
+        self.cesta = Path(cesta)
+
+    def smaz(self):
+        self.cesta.unlink(missing_ok=True)
+
+    def _pripis(self, zaznam: dict):
+        with open(self.cesta, "a", encoding="utf-8") as f:
+            f.write(json.dumps(zaznam, ensure_ascii=False) + "\n")
+
+    def hlavicka(self, parametry: dict, sr: int, nazev: str):
+        self._pripis({"hlavicka": {"parametry": parametry, "sr": int(sr), "nazev": nazev}})
+
+    def pridej(self, blok: int, soubor: str, od: int, delka: int, text: str):
+        self._pripis({"blok": int(blok), "soubor": soubor, "od": int(od),
+                      "delka": int(delka), "text": text})
+
+    def nacti(self):
+        """Vrátí (hlavička, {soubor: [záznamy seřazené podle začátku]})."""
+        hlavicka, bloky = {}, {}
+        if not self.cesta.exists():
+            return hlavicka, {}
+        for radek in self.cesta.read_text(encoding="utf-8").splitlines():
+            if not radek.strip():
+                continue
+            zaznam = json.loads(radek)
+            if "hlavicka" in zaznam:
+                hlavicka = zaznam["hlavicka"]
+            else:
+                bloky[zaznam["blok"]] = zaznam
+        soubory = {}
+        for zaznam in bloky.values():
+            soubory.setdefault(zaznam["soubor"], []).append(zaznam)
+        for seznam in soubory.values():
+            seznam.sort(key=lambda z: z["od"])
+        return hlavicka, soubory
+
+    def prepis(self, hlavicka: dict, soubory: dict):
+        docasny = self.cesta.with_suffix(".tmp")
+        with open(docasny, "w", encoding="utf-8") as f:
+            if hlavicka:
+                f.write(json.dumps({"hlavicka": hlavicka}, ensure_ascii=False) + "\n")
+            for seznam in soubory.values():
+                for zaznam in seznam:
+                    f.write(json.dumps(zaznam, ensure_ascii=False) + "\n")
+        docasny.replace(self.cesta)
+
+
+def najdi_mapu(soubor: Path):
+    """Mapa, ve které je daný soubor, nebo None."""
+    soubor = Path(soubor)
+    for cesta in sorted(soubor.parent.glob("*" + MapaBloku.PRIPONA)):
+        try:
+            if soubor.stem in MapaBloku(cesta).nacti()[1]:
+                return cesta
+        except Exception:
+            continue
+    return None
+
+
+def najdi_pauzy(pcm, sr: int, min_s: float) -> list:
+    """Úseky digitálního ticha delší než min_s jako (začátek, konec) ve vzorcích."""
+    import numpy as np
+
+    tiche = (np.abs(np.asarray(pcm).astype("int32")) <= 2).astype("int8")
+    zmeny = np.diff(np.concatenate(([0], tiche, [0])))
+    zacatky, konce = np.flatnonzero(zmeny == 1), np.flatnonzero(zmeny == -1)
+    nejmene = max(1, int(sr * min_s))
+    return [(int(a), int(b)) for a, b in zip(zacatky, konce) if b - a >= nejmene]
+
+
+def rekonstruuj_bloky(pcm, sr: int, pauza_ms: int, pocet: int):
+    """Hranice bloků podle pauz, které aplikace vkládá za každý blok.
+
+    Vrací (seznam (od, délka), kolik pauz se našlo). Seznam je None, když počet
+    nesedí. Práh je 80 % pauzy: rozdělený blok má uvnitř nejvýš 150 ms a ticho
+    přímo od modelu digitální nulu nemá. Na deseti kapitolách Ovidia sedělo vše.
+    """
+    if pauza_ms <= 0:
+        return None, 0
+    pauzy = [(a, b) for a, b in najdi_pauzy(pcm, sr, 0.8 * pauza_ms / 1000.0) if a > 0]
+    if len(pauzy) != pocet:
+        return None, len(pauzy)
+    useky, od = [], 0
+    for a, b in pauzy:
+        useky.append((od, a - od))
+        od = b
+    return useky, len(pauzy)
+
+
+def cas_na_sekundy(text: str):
+    """'85', '1:25', '01:25.5' i '0:01:25' na sekundy. Nesmysl vrátí None."""
+    casti = text.strip().replace(",", ".").split(":")
+    if not casti or len(casti) > 3:
+        return None
+    try:
+        hodnoty = [float(c) for c in casti]
+    except ValueError:
+        return None
+    if any(h < 0 for h in hodnoty):
+        return None
+    sekundy = 0.0
+    for h in hodnoty:
+        sekundy = sekundy * 60 + h
+    return sekundy
+
+
+def vymen_usek(pcm, od: int, delka: int, nove):
+    """Nahradí vzorky [od, od+delka) novými. Vrací (nové pole, posun dalších bloků)."""
+    import numpy as np
+
+    nove = (np.clip(np.asarray(nove, dtype="float32").reshape(-1), -1.0, 1.0) * 32767.0).astype("<i2")
+    return np.concatenate([pcm[:od], nove, pcm[od + delka:]]), len(nove) - delka
+
+
+def _ffprobe() -> str:
+    ffmpeg = najdi_ffmpeg()
+    if not ffmpeg:
+        return ""
+    vedle = Path(ffmpeg).with_name("ffprobe.exe" if ffmpeg.lower().endswith(".exe") else "ffprobe")
+    return str(vedle) if vedle.exists() else (shutil.which("ffprobe") or "")
+
+
+def _spust(prikaz) -> subprocess.CompletedProcess:
+    return subprocess.run(prikaz, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def dekoduj_zvuk(cesta: Path, sr: int):
+    """Celý soubor jako mono int16 v dané vzorkovací frekvenci."""
+    import numpy as np
+
+    vysledek = _spust([najdi_ffmpeg(), "-v", "error", "-i", str(cesta),
+                       "-f", "s16le", "-ac", "1", "-ar", str(sr), "-"])
+    if vysledek.returncode != 0:
+        raise RuntimeError(vysledek.stderr.decode("utf-8", "replace").strip()[:300])
+    return np.frombuffer(vysledek.stdout, dtype="<i2").copy()
+
+
+def uloz_zvuk(cesta: Path, pcm, sr: int, bitrate: str = "") -> Path:
+    """Přepíše soubor novým zvukem. Předchozí verzi zazálohuje do temp, vrátí cestu k záloze.
+
+    U MP3 se zachová ID3 i obálka. Nový soubor vzniká vedle a teprve hotový
+    nahradí původní, takže nepovedený převod nic nerozbije.
+    """
+    cesta = Path(cesta)
+    zalohy = TEMP_DIR / "zalohy_oprav"
+    zalohy.mkdir(parents=True, exist_ok=True)
+    zaloha = zalohy / (cesta.stem + time.strftime(" %Y%m%d-%H%M%S") + cesta.suffix)
+    shutil.copy2(cesta, zaloha)
+
+    docasny_wav = cesta.with_name(cesta.stem + ".oprava.wav")
+    z = WavZapisovac(docasny_wav, sr)
+    z.soubor.writeframes(pcm.astype("<i2").tobytes())
+    z.zavri()
+
+    if cesta.suffix.lower() != ".mp3":
+        docasny_wav.replace(cesta)
+        return zaloha
+
+    meta, obalka = {}, None
+    probe = _ffprobe()
+    if probe:
+        vysledek = _spust([probe, "-v", "error", "-show_entries", "format=bit_rate:format_tags",
+                           "-of", "json", str(cesta)])
+        if vysledek.returncode == 0:
+            format_ = json.loads(vysledek.stdout.decode("utf-8", "replace")).get("format", {})
+            meta = {k.lower(): v for k, v in (format_.get("tags") or {}).items()}
+            if not bitrate and format_.get("bit_rate"):
+                bitrate = "{}k".format(round(int(format_["bit_rate"]) / 1000))
+    kandidat = cesta.with_name(cesta.stem + ".oprava.jpg")
+    if _spust([najdi_ffmpeg(), "-v", "error", "-y", "-i", str(cesta), "-an",
+               "-c:v", "copy", str(kandidat)]).returncode == 0 and kandidat.exists():
+        obalka = kandidat
+
+    docasny_mp3 = cesta.with_name(cesta.stem + ".oprava.mp3")
+    try:
+        if not prevod_na_mp3(docasny_wav, docasny_mp3, bitrate or "128k", meta, obalka):
+            raise RuntimeError(T("oprava_mp3_selhal"))
+        docasny_mp3.replace(cesta)
+    finally:
+        docasny_wav.unlink(missing_ok=True)
+        docasny_mp3.unlink(missing_ok=True)
+        if obalka is not None:
+            obalka.unlink(missing_ok=True)
+    return zaloha
+
+
 class DialogRozdelane(tk.Toplevel):
     """Nabídka rozdělaných převodů. Vrací vybraný záznam, nebo None."""
 
@@ -2310,6 +2707,354 @@ class DialogRozdelane(tk.Toplevel):
         self.destroy()
 
 
+class DialogOprava(tk.Toplevel):
+    """Najde blok podle času, vygeneruje ho znovu a vymění v hotovém souboru."""
+
+    def __init__(self, app, slozka: Path):
+        super().__init__(app)
+        self.app = app
+        self.slozka = Path(slozka)
+        self.fronta = queue.Queue()
+        self.prace = False
+        self.soubor = None
+        self.mapa = None
+        self.hlavicka = {}
+        self.vsechny = {}          # {soubor: [záznamy]} z celé mapy
+        self.zaznamy = []          # bloky vybraného souboru
+        self.aktualni = None
+        self.pcm = None
+        self.sr = 24000
+        self.nove = None
+        self.novy_text = ""
+
+        self.title(T("dlg_oprava"))
+        self.configure(background=BARVY["pozadi"])
+        self.transient(app)
+        self.minsize(660, 380)
+
+        ramec = ttk.Frame(self, padding=(22, 18, 22, 16))
+        ramec.pack(fill="both", expand=True)
+        ttk.Label(ramec, text=T("oprava_popis"), style="Tlumeny.TLabel",
+                  wraplength=660, justify="left").pack(anchor="w", pady=(0, 12))
+
+        rada = ttk.Frame(ramec)
+        rada.pack(fill="x")
+        ttk.Label(rada, text=T("lab_soubor")).pack(side="left", padx=(0, 12))
+        self.var_soubor = tk.StringVar()
+        self.vyber = ttk.Combobox(rada, textvariable=self.var_soubor, state="readonly", width=52)
+        self.vyber.pack(side="left", fill="x", expand=True)
+        self.vyber.bind("<<ComboboxSelected>>",
+                        lambda _u: self._nacti(self.slozka / self.var_soubor.get()))
+        ttk.Button(rada, text=T("btn_vybrat"), style="Tichy.TButton",
+                   command=self._vyber_soubor).pack(side="left", padx=(8, 0))
+
+        rada = ttk.Frame(ramec)
+        rada.pack(fill="x", pady=(10, 0))
+        ttk.Label(rada, text=T("lab_cas")).pack(side="left", padx=(0, 12))
+        self.var_cas = tk.StringVar()
+        pole = ttk.Entry(rada, textvariable=self.var_cas, width=10)
+        pole.pack(side="left")
+        pole.bind("<Return>", lambda _u: self._najdi())
+        ttk.Button(rada, text=T("btn_najit"), style="Tichy.TButton",
+                   command=self._najdi).pack(side="left", padx=(8, 0))
+        ttk.Button(rada, text="◀", width=3, style="Tichy.TButton",
+                   command=lambda: self._posun(-1)).pack(side="left", padx=(20, 0))
+        ttk.Button(rada, text="▶", width=3, style="Tichy.TButton",
+                   command=lambda: self._posun(1)).pack(side="left", padx=(6, 0))
+        self.var_blok = tk.StringVar()
+        ttk.Label(rada, textvariable=self.var_blok,
+                  style="Tlumeny.TLabel").pack(side="left", padx=(14, 0))
+
+        self.text = tk.Text(ramec, height=6, width=80, wrap="word", font=(app.font_rodina, 10),
+                            background=BARVY["panel"], foreground=BARVY["text"],
+                            insertbackground=BARVY["text"], relief="flat", borderwidth=0,
+                            highlightthickness=0, padx=10, pady=8)
+        self.text.pack(fill="both", expand=True, pady=(12, 0))
+
+        tlacitka = ttk.Frame(ramec)
+        tlacitka.pack(fill="x", pady=(14, 0))
+        self.btn_puvodni = ttk.Button(tlacitka, text=T("btn_prehrat_puvodni"), style="Tichy.TButton",
+                                      command=self._prehraj_puvodni)
+        self.btn_puvodni.pack(side="left")
+        self.btn_generovat = ttk.Button(tlacitka, text=T("btn_generovat_znovu"), style="Akce.TButton",
+                                        command=self._generuj)
+        self.btn_generovat.pack(side="left", padx=(10, 0))
+        self.btn_novy = ttk.Button(tlacitka, text=T("btn_prehrat_novy"), style="Tichy.TButton",
+                                   command=self._prehraj_novy)
+        self.btn_novy.pack(side="left", padx=(10, 0))
+        self.btn_nahradit = ttk.Button(tlacitka, text=T("btn_nahradit"), style="Tichy.TButton",
+                                       command=self._nahrad)
+        self.btn_nahradit.pack(side="left", padx=(10, 0))
+        ttk.Button(tlacitka, text=T("btn_zavrit"), style="Tichy.TButton",
+                   command=self._zavri).pack(side="right")
+
+        self.var_stav = tk.StringVar()
+        ttk.Label(ramec, textvariable=self.var_stav, style="Tlumeny.TLabel",
+                  wraplength=660, justify="left").pack(anchor="w", pady=(10, 0))
+
+        self.protocol("WM_DELETE_WINDOW", self._zavri)
+        self.bind("<Escape>", lambda _u: self._zavri())
+
+        self.update_idletasks()
+        x = app.winfo_rootx() + (app.winfo_width() - self.winfo_width()) // 2
+        self.geometry(f"+{max(0, x)}+{max(0, app.winfo_rooty() + 120)}")
+        self.grab_set()
+        self._nabidni_soubory()
+        self.after(120, self._zpracuj_frontu)
+
+    # ------------------------------------------------------------------
+    def _nabidni_soubory(self, vybrat: str = ""):
+        # Rozepsaná kapitola z přerušeného převodu se měnit nesmí - navázání
+        # ji usekne na uložený počet vzorků.
+        rozepsane = set()
+        for kde in (self.slozka, self.slozka.parent):
+            for stav in kde.glob("*.progress.json"):
+                try:
+                    data = json.loads(stav.read_text(encoding="utf-8"))
+                    rozepsane.add(Path(data.get("aktualni_wav") or "").name)
+                except Exception:
+                    continue
+        soubory = sorted(p.name for p in self.slozka.glob("*")
+                         if p.suffix.lower() in (".mp3", ".wav") and ".oprava." not in p.name
+                         and p.name not in rozepsane) if self.slozka.is_dir() else []
+        self.vyber.configure(values=soubory)
+        if not soubory:
+            self.var_stav.set(T("oprava_zadny_soubor", self.slozka))
+            self._obnov_tlacitka()
+            return
+        self.var_soubor.set(vybrat if vybrat in soubory else soubory[0])
+        self._nacti(self.slozka / self.var_soubor.get())
+
+    def _vyber_soubor(self):
+        if self.prace:
+            return
+        cesta = filedialog.askopenfilename(parent=self, initialdir=str(self.slozka),
+                                           filetypes=[(T("filtr_zvuk"), "*.mp3 *.wav")])
+        if cesta:
+            self.slozka = Path(cesta).parent
+            self._nabidni_soubory(Path(cesta).name)
+
+    def _nacti(self, cesta: Path):
+        if self.prace:
+            return
+        cesta = Path(cesta)
+        self.soubor, self.zaznamy, self.aktualni, self.nove, self.pcm = cesta, [], None, None, None
+        self.text.delete("1.0", "end")
+        self.var_blok.set("")
+        self.configure(cursor="watch")
+        self.update_idletasks()
+        try:
+            mapa = najdi_mapu(cesta)
+            if mapa is not None:
+                self.mapa = MapaBloku(mapa)
+                self.hlavicka, self.vsechny = self.mapa.nacti()
+                self.sr = int(self.hlavicka.get("sr") or 24000)
+                self.pcm = dekoduj_zvuk(cesta, self.sr)
+                self.zaznamy = [z for z in self.vsechny.get(cesta.stem, [])
+                                if z["od"] + z["delka"] <= len(self.pcm)]
+                pauza = int((self.hlavicka.get("parametry") or {}).get("pauza_ms", 0))
+                if not self.souvisla(self.zaznamy, self.sr, pauza):
+                    mapa = None
+            if mapa is None:
+                self.pcm, self.zaznamy = None, []
+                self._dohledej(cesta)
+            else:
+                self.var_stav.set(T("oprava_nacteno", len(self.zaznamy)))
+        except Exception as chyba:
+            self.pcm, self.zaznamy = None, []
+            self.var_stav.set(T("oprava_chyba", chyba))
+        finally:
+            self.configure(cursor="")
+        self._obnov_tlacitka()
+
+    @staticmethod
+    def souvisla(zaznamy, sr: int, pauza_ms: int) -> bool:
+        """Pokrývá mapa soubor od začátku bez mezer?
+
+        Kapitola rozepsaná ve verzi bez mapy má po navázání zapsané jen bloky
+        od místa navázání. Podle takové mapy by čas ukázal na špatný blok.
+        """
+        pauza = int(sr * pauza_ms / 1000.0) if pauza_ms > 0 else 0
+        if not zaznamy or zaznamy[0]["od"] != 0:
+            return False
+        return all(dalsi["od"] == z["od"] + z["delka"] + pauza
+                   for z, dalsi in zip(zaznamy, zaznamy[1:]))
+
+    def _dohledej(self, cesta: Path):
+        """Soubor bez mapy: hranice bloků podle pauz a texty z načtené knihy."""
+        app = self.app
+        if app.ma_kapitoly:
+            cislo = re.match(r"(\d+)", cesta.stem)
+            kap_i = int(cislo.group(1)) - 1 if cislo else -1
+            texty = [(i + 1, b) for i, (k, b) in enumerate(app.bloky) if k == kap_i]
+        else:
+            texty = [(i + 1, b) for i, (_k, b) in enumerate(app.bloky)]
+        if not texty:
+            self.var_stav.set(T("oprava_bez_mapy"))
+            return
+        self.sr = 24000
+        pcm = dekoduj_zvuk(cesta, self.sr)
+        useky, nalezeno = rekonstruuj_bloky(pcm, self.sr, int(app.var_pauza.get()), len(texty))
+        if useky is None:
+            self.var_stav.set(T("oprava_nesedi", len(texty), nalezeno))
+            return
+        nazev = cesta.parent.name if app.ma_kapitoly else cesta.stem
+        self.mapa = MapaBloku(cesta.parent / (nazev + MapaBloku.PRIPONA))
+        self.hlavicka, self.vsechny = self.mapa.nacti()
+        if not self.hlavicka:
+            self.hlavicka = {"parametry": app._posbirej_parametry(), "sr": self.sr, "nazev": nazev}
+        self.pcm = pcm
+        self.zaznamy = [{"blok": i, "soubor": cesta.stem, "od": od, "delka": delka, "text": text}
+                        for (i, text), (od, delka) in zip(texty, useky)]
+        self.vsechny[cesta.stem] = self.zaznamy
+        self.mapa.prepis(self.hlavicka, self.vsechny)
+        self.var_stav.set(T("oprava_dohledano", len(self.zaznamy)))
+
+    # ------------------------------------------------------------------
+    def _najdi(self):
+        if not self.zaznamy:
+            return
+        sekundy = cas_na_sekundy(self.var_cas.get())
+        if sekundy is None:
+            self.var_stav.set(T("oprava_spatny_cas"))
+            return
+        vzorek = int(sekundy * self.sr)
+        if vzorek >= len(self.pcm):
+            self.var_stav.set(T("oprava_mimo"))
+            return
+        pred = [i for i, z in enumerate(self.zaznamy) if z["od"] <= vzorek]
+        self._ukaz(pred[-1] if pred else 0)
+
+    def _posun(self, krok: int):
+        if self.aktualni is not None:
+            self._ukaz(max(0, min(len(self.zaznamy) - 1, self.aktualni + krok)))
+
+    def _ukaz(self, i: int):
+        if self.prace:
+            return
+        self.aktualni, self.nove = i, None
+        z = self.zaznamy[i]
+        self.var_blok.set(T("oprava_blok", z["blok"], formatuj_cas(z["od"] / self.sr),
+                            formatuj_cas((z["od"] + z["delka"]) / self.sr)))
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", z["text"])
+        self.var_stav.set("")
+        self._obnov_tlacitka()
+
+    def _obnov_tlacitka(self):
+        vybrano = self.aktualni is not None and not self.prace
+        for tlacitko in (self.btn_puvodni, self.btn_generovat):
+            tlacitko.configure(state="normal" if vybrano else "disabled")
+        for tlacitko in (self.btn_novy, self.btn_nahradit):
+            tlacitko.configure(state="normal" if vybrano and self.nove is not None else "disabled")
+
+    def _pracuje(self, stav: bool, zprava: str):
+        self.prace = stav
+        self.var_stav.set(zprava)
+        self.configure(cursor="watch" if stav else "")
+        self._obnov_tlacitka()
+
+    # ------------------------------------------------------------------
+    def _prehraj(self, vzorky, jmeno: str):
+        cesta = TEMP_DIR / jmeno
+        z = WavZapisovac(cesta, self.sr)
+        z.zapis(vzorky)
+        z.zavri()
+        self.app.prehraj(cesta)
+
+    def _prehraj_puvodni(self):
+        z = self.zaznamy[self.aktualni]
+        self._prehraj(self.pcm[z["od"]:z["od"] + z["delka"]].astype("float32") / 32767.0,
+                      "oprava_puvodni.wav")
+
+    def _prehraj_novy(self):
+        if self.nove is not None:
+            self._prehraj(self.nove, "oprava_novy.wav")
+
+    def _parametry(self) -> dict:
+        # Hlas knihy z mapy, jinak (u dohledaných souborů) to, co je v okně
+        return {**self.app._posbirej_parametry(), **(self.hlavicka.get("parametry") or {})}
+
+    def _generuj(self):
+        text = self.text.get("1.0", "end").strip()
+        if self.prace or self.aktualni is None or not text:
+            return
+        z = self.zaznamy[self.aktualni]
+        p = self._parametry()
+        self._pracuje(True, T("oprava_generuji"))
+
+        def prace():
+            try:
+                engine = self.app.engine
+                engine.nacti_model(p["zarizeni"], p["jazyk_textu"], p.get("rychly_dekoder", False))
+                nastav_seed(int(time.time() * 1000) % 999983)
+                vzorky, _vynechano = generuj_blok(engine, text, p, z["blok"], z["blok"],
+                                                  self.app.log_z_vlakna)
+                self.fronta.put(("vygenerovano", (vzorky, text)))
+            except Exception as chyba:
+                self.fronta.put(("chyba", chyba))
+
+        threading.Thread(target=prace, daemon=True).start()
+
+    def _nahrad(self):
+        if self.prace or self.nove is None:
+            return
+        z = self.zaznamy[self.aktualni]
+        cesta, pcm, nove, sr = self.soubor, self.pcm, self.nove, self.sr
+        self._pracuje(True, T("oprava_nahrazuji"))
+
+        def prace():
+            try:
+                nove_pcm, posun = vymen_usek(pcm, z["od"], z["delka"], nove)
+                zaloha = uloz_zvuk(cesta, nove_pcm, sr)
+                self.fronta.put(("nahrazeno", (nove_pcm, posun, zaloha)))
+            except Exception as chyba:
+                self.fronta.put(("chyba", chyba))
+
+        threading.Thread(target=prace, daemon=True).start()
+
+    def _zpracuj_frontu(self):
+        try:
+            while True:
+                typ, data = self.fronta.get_nowait()
+                if typ == "vygenerovano":
+                    vzorky, text = data
+                    self._pracuje(False, "")
+                    if vzorky is None:
+                        self.var_stav.set(T("oprava_nevyslo"))
+                        continue
+                    self.nove, self.novy_text = vzorky, text
+                    z = self.zaznamy[self.aktualni]
+                    self.var_stav.set(T("oprava_vygenerovano", len(vzorky) / self.sr, z["delka"] / self.sr))
+                    self._obnov_tlacitka()
+                    self._prehraj_novy()
+                elif typ == "nahrazeno":
+                    pcm, posun, zaloha = data
+                    z = self.zaznamy[self.aktualni]
+                    z["delka"] += posun
+                    z["text"] = self.novy_text
+                    for dalsi in self.zaznamy[self.aktualni + 1:]:
+                        dalsi["od"] += posun
+                    self.pcm = pcm
+                    self.mapa.prepis(self.hlavicka, self.vsechny)
+                    self.app.log(T("log_oprava", self.soubor.name, z["blok"]))
+                    self.prace = False
+                    self._ukaz(self.aktualni)
+                    self.var_stav.set(T("oprava_nahrazeno", zaloha))
+                elif typ == "chyba":
+                    self._pracuje(False, T("oprava_chyba", data))
+        except queue.Empty:
+            pass
+        if self.winfo_exists():
+            self.after(120, self._zpracuj_frontu)
+
+    def _zavri(self):
+        if self.prace:
+            return
+        self.grab_release()
+        self.destroy()
+
+
 class Aplikace(tk.Tk):
 
     def __init__(self):
@@ -2326,7 +3071,8 @@ class Aplikace(tk.Tk):
         sirka = min(1000, self.winfo_screenwidth() - 40)
         vyska = min(980, self.winfo_screenheight() - 100)
         self.geometry(f"{sirka}x{vyska}")
-        self.minsize(min(920, sirka), min(480, vyska))
+        # Řada ovládání s opravou úseku potřebuje v češtině 904 bodů plus okraje
+        self.minsize(min(960, sirka), min(480, vyska))
 
         self.fronta = queue.Queue()
         self.vlakno = None
@@ -2398,6 +3144,7 @@ class Aplikace(tk.Tk):
             "odstranit_lupance": bool(self.var_lupance.get()),
             "orezat_okraje": bool(self.var_orez.get()),
             "rychly_dekoder": bool(self.var_rychly_dekoder.get()),
+            "kontrola_asr": bool(self.var_kontrola_asr.get()),
             "seed": int(self.var_seed.get() or 0),
             "jazyk_textu": self._klic_jazyka_textu(),
             "zarizeni": self.var_zarizeni.get(),
@@ -2478,6 +3225,7 @@ class Aplikace(tk.Tk):
         self.var_lupance = tk.BooleanVar(value=c["odstranit_lupance"])
         self.var_orez = tk.BooleanVar(value=c["orezat_okraje"])
         self.var_rychly_dekoder = tk.BooleanVar(value=c["rychly_dekoder"])
+        self.var_kontrola_asr = tk.BooleanVar(value=c["kontrola_asr"])
         self.var_seed = tk.IntVar(value=c["seed"])
         self.var_jazyk_textu = tk.StringVar(value=self._nazev_jazyka_textu(c["jazyk_textu"]))
         self.var_zarizeni = tk.StringVar(value=c["zarizeni"])
@@ -2714,6 +3462,16 @@ class Aplikace(tk.Tk):
                   style="Tlumeny.TLabel").pack(side="left", padx=(14, 0))
         self._zamknout(ch5)
 
+        rada_asr = ttk.Frame(gen)
+        rada_asr.grid(row=7, column=0, columnspan=5, sticky="ew", pady=(10, 0))
+        ch6 = ttk.Checkbutton(rada_asr, text=T("lab_kontrola_asr"),
+                              variable=self.var_kontrola_asr)
+        ch6.pack(side="left")
+        ttk.Label(rada_asr, text=T("hint_asr_stazeno") if asr_stazeny()
+                  else T("hint_asr_stahne", ASR_GB),
+                  style="Tlumeny.TLabel").pack(side="left", padx=(14, 0))
+        self._zamknout(ch6)
+
         # ---------------- Ovládání ----------------
         ovladani = ttk.Frame(hlavni)
         ovladani.pack(fill="x", pady=(6, 0))
@@ -2733,6 +3491,8 @@ class Aplikace(tk.Tk):
         self.btn_stop.pack(side="left", padx=(6, 0))
         ttk.Button(ovladani, text=T("btn_otevrit"), command=self.otevri_vystup,
                    style="Tichy.TButton").pack(side="right")
+        ttk.Button(ovladani, text=T("btn_oprava"), command=self.oprav_usek,
+                   style="Tichy.TButton").pack(side="right", padx=(0, 10))
 
         # ---------------- Průběh ----------------
         postup = ttk.Frame(hlavni)
@@ -3295,6 +4055,16 @@ class Aplikace(tk.Tk):
         except Exception as chyba:
             messagebox.showerror(T("dlg_chyba"), T("dlg_slozka", chyba))
 
+    def oprav_usek(self):
+        if self.bezi:
+            messagebox.showinfo(T("dlg_probiha"), T("dlg_pockejte"))
+            return
+        slozka = Path(self.var_vystup_slozka.get().strip('" ') or (APP_DIR / "vystup"))
+        nazev = re.sub(ZAKAZANE_ZNAKY, "_", self.var_vystup_nazev.get().strip()
+                       or self.nazev_knihy or "audiokniha")
+        kniha = slozka / nazev
+        self.wait_window(DialogOprava(self, kniha if kniha.is_dir() else slozka))
+
     def prehraj(self, cesta: Path):
         try:
             os.startfile(str(cesta))
@@ -3430,6 +4200,7 @@ class Aplikace(tk.Tk):
             "odstranit_lupance": bool(self.var_lupance.get()),
             "orezat_okraje": bool(self.var_orez.get()),
             "rychly_dekoder": bool(self.var_rychly_dekoder.get()),
+            "kontrola_asr": bool(self.var_kontrola_asr.get()),
             "seed": int(self.var_seed.get() or 0),
             "zarizeni": self.var_zarizeni.get(),
             "jazyk_textu": self._klic_jazyka_textu(),
@@ -3449,7 +4220,8 @@ class Aplikace(tk.Tk):
         "min_p": "lab_min_p", "seed": "lab_seed", "pauza_ms": "lab_pauza_ms",
         "format": "nazev_format", "bitrate": "nazev_bitrate", "max_znaku": "lab_znaku",
         "odstranit_lupance": "lab_lupance", "orezat_okraje": "lab_orez",
-        "rychly_dekoder": "lab_rychly_dekoder", "slovnik": "nazev_slovnik",
+        "rychly_dekoder": "lab_rychly_dekoder", "kontrola_asr": "lab_kontrola_asr",
+        "slovnik": "nazev_slovnik",
     }
 
     def _nazev_nastaveni(self, klic: str) -> str:
@@ -3509,6 +4281,7 @@ class Aplikace(tk.Tk):
             ("orezat_okraje", self.var_orez, bool),
             ("obalka", self.var_obalka, bool),
             ("rychly_dekoder", self.var_rychly_dekoder, bool),
+            ("kontrola_asr", self.var_kontrola_asr, bool),
         ]
         # Kniha uložená dřív, než rychlý dekodér existoval, vznikla bez něj
         parametry = {"rychly_dekoder": False, **parametry}
@@ -3672,6 +4445,10 @@ class Aplikace(tk.Tk):
                     # Stáhnout teď, jinak by si ho při prvním použití
                     # stahoval každý pracovník zvlášť
                     self.engine.stahni_rychly_dekoder()
+                if p.get("kontrola_asr") and not asr_stazeny():
+                    self.log_z_vlakna(T("log_asr_stahuji", ASR_GB))
+                    from huggingface_hub import snapshot_download
+                    snapshot_download(ASR_REPO)
                 pool = Pool(pocet, {"zarizeni": p["zarizeni"], "jazyk_textu": p["jazyk_textu"],
                                     "rychly_dekoder": bool(p.get("rychly_dekoder"))},
                             self.log_z_vlakna)
@@ -3702,6 +4479,12 @@ class Aplikace(tk.Tk):
             slozka = (zaklad.parent / zaklad.stem) if po_kapitolach else zaklad.parent
             slozka.mkdir(parents=True, exist_ok=True)
 
+            # Kde který blok leží - podle toho jde později opravit jeden úsek
+            mapa = MapaBloku(slozka / (zaklad.stem + MapaBloku.PRIPONA))
+            if not od_bloku:
+                mapa.smaz()
+            mapa.hlavicka(p["ulozitelne"], sr, zaklad.stem)
+
             self.fronta.put(("stav", T("stav_generuji")))
             if od_bloku:
                 self.log_z_vlakna(T("log_navazuji", od_bloku + 1, celkem))
@@ -3729,10 +4512,7 @@ class Aplikace(tk.Tk):
             preskocene = postup.preskocene if (postup is not None and od_bloku) else []
 
             def cesta_kapitoly(kap_i):
-                nazev = (self.kapitoly[kap_i].get("nazev") or "").strip()
-                nazev = re.sub(ZAKAZANE_ZNAKY, "", nazev)[:60].strip(" .")
-                jmeno = "{:02d}".format(kap_i + 1) + (" - " + nazev if nazev else "")
-                return slozka / (jmeno + ".wav")
+                return slozka / (nazev_souboru_kapitoly(kap_i, self.kapitoly[kap_i].get("nazev")) + ".wav")
 
             def uzavri_a_preved(kap_i, dokoncena=True):
                 """Kapitolu dopsat a případně převést na MP3.
@@ -3799,6 +4579,8 @@ class Aplikace(tk.Tk):
                 if vzorky is None:
                     neuspesne += 1
                 else:
+                    mapa.pridej(index, self._zapisovac.cesta.stem, self._zapisovac.pocet_vzorku,
+                                len(vzorky), blok)
                     self._zapisovac.zapis(vzorky)
                     self._zapisovac.zapis_ticho(p["pauza_ms"])
                     if self.prehravac is not None and self.prehravac.bezi:
