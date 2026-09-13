@@ -5326,6 +5326,9 @@ class Aplikace(tk.Tk):
 
         slozka = Path(self.var_vystup_slozka.get().strip('" ') or (APP_DIR / "vystup"))
         nazev = (self.var_vystup_nazev.get().strip() or self.nazev_knihy or "audiokniha")
+        # Obálka nese název tak, jak ho uživatel napsal - i s dvojtečkou,
+        # kterou je v názvu souboru potřeba nahradit
+        self.nazev_vystupu = nazev
         nazev = re.sub(ZAKAZANE_ZNAKY, "_", nazev)
         slozka.mkdir(parents=True, exist_ok=True)
         zaklad = slozka / nazev
@@ -5509,7 +5512,7 @@ class Aplikace(tk.Tk):
             obalka_cesta = None
             if p["obalka"]:
                 kandidat = slozka / (zaklad.stem + ".png")
-                if kandidat.exists() or vytvor_obalku(self.nazev_knihy or zaklad.stem, kandidat):
+                if kandidat.exists() or vytvor_obalku(self.nazev_vystupu or zaklad.stem, kandidat):
                     obalka_cesta = kandidat
                     self.log_z_vlakna(T("log_obalka", kandidat.name))
                     self.fronta.put(("obalka", str(kandidat)))
@@ -5545,7 +5548,7 @@ class Aplikace(tk.Tk):
                     return
                 mp3 = wav.with_suffix(".mp3")
                 popis = self.kapitoly[kap_i].get("nazev") or wav.stem
-                meta = {"title": popis, "album": self.nazev_knihy or zaklad.stem,
+                meta = {"title": popis, "album": self.nazev_vystupu or zaklad.stem,
                         "track": str(kap_i + 1), "genre": "Audiobook"}
                 if prevod_na_mp3(wav, mp3, p["bitrate"], meta, obalka_cesta):
                     wav.unlink(missing_ok=True)       # WAV už není k ničemu
@@ -5655,7 +5658,7 @@ class Aplikace(tk.Tk):
                     self.fronta.put(("stav", T("stav_mp3")))
                     self.log_z_vlakna(T("log_mp3"))
                     mp3 = jediny_wav.with_suffix(".mp3")
-                    meta = {"title": self.nazev_knihy or zaklad.stem, "genre": "Audiobook",
+                    meta = {"title": self.nazev_vystupu or zaklad.stem, "genre": "Audiobook",
                             "comment": "Vytvořeno pomocí Chatterbox TTS"}
                     if prevod_na_mp3(jediny_wav, mp3, p["bitrate"], meta, obalka_cesta):
                         jediny_wav.unlink(missing_ok=True)   # při MP3 WAV neuchováváme
