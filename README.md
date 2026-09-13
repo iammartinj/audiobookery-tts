@@ -53,28 +53,40 @@ placing in `~/.pkuseg`.
 
 ## Using it
 
-1. **Book** — pick a file and the language it is written in.
-2. **Voice** — pick a reference recording, 10–20 s of clean speech, mono.
-   Without one you get the model's built-in English-speaking voice, which will
-   read every language with an English accent. Use **test voice** to check
-   before committing to a whole book.
-3. **Output** — folder, name, WAV or MP3.
-4. **Start conversion.** Pause or stop at any point; whatever was generated
-   stays in the file.
+The window opens on the settings card and a *ready to convert* card. Settings
+sit in three columns:
 
-Advanced parameters — expressiveness, pace, temperature, block size, seed —
-live behind the *advanced settings* toggle. Defaults are tuned for calm
-narration.
+1. **Source** — the book and the language it is written in.
+2. **Voice** — a reference recording, 10–20 s of clean speech, mono. Without
+   one you get the model's built-in English-speaking voice, which will read
+   every language with an English accent. **Play** next to the test sentence
+   lets you check before committing to a whole book.
+3. **Output** — file name, folder, WAV or MP3 with an estimated size, and
+   switches for the cover, click removal, edge trimming and the fast decoder.
+   Expressiveness, pace, temperature, block size, seed and the transcription
+   check are under *advanced…*.
+
+**Start conversion** collapses the settings into one summary line and shows the
+conversion: the cover, progress through the book, a strip with one bar per
+chapter, the player and a chapter list. Unfinished conversions are listed on the
+opening screen with a *continue* link.
+
+The ☀/☾ button in the header switches between the dark and the light scheme.
+The window adapts to its size — on a small screen the columns stack and the
+content scrolls, so nothing ends up below the edge.
 
 ### Listening while it converts
 
-With parallel generation the buffer **grows** while you listen, so a head start
-of a minute or two is enough and you can keep listening indefinitely. On a
-single process generation runs slightly slower than playback (0.91×) and the
-buffer drains — roughly twenty times slower than it fills, so a three-minute
-head start buys about an hour.
+The player plays straight from the output folder: finished chapters and the one
+being generated, which it keeps reading as blocks arrive. There is no head start
+to wait for. You can skip anywhere in what has been generated, move ±15/30 s,
+jump between chapters or pick one from the list, and *jump to live* goes to the
+newest audio. When playback catches up with generation, it waits for the next
+block.
 
-If the buffer does run dry, playback waits for the next block. Nothing breaks.
+The waveform under the controls covers the chapter being played: the played part
+in full colour, the generated part muted, the rest of the chapter — its length
+estimated from the text — as a flat line.
 
 ### Preparing a reference recording
 
@@ -436,10 +448,10 @@ a power cut, a reboot, needing the GPU for something else. A progress file is
 written next to the output after every block, recording the source fingerprint,
 the block reached and the exact sample count in the file being written.
 
-**Pick up an unfinished book** with the *resume unfinished* button next to the
-start button. It scans the output folder for interrupted conversions and lists
-them with their progress, so you can come back to a book days later, even after
-converting something else in between. Selecting one restores the settings from
+**Pick up an unfinished book** from the list on the opening screen. It shows
+interrupted conversions from the output folder with their progress and when they
+stopped, so you can come back to a book days later, even after converting
+something else in between. Selecting one restores the settings from
 the run that was interrupted — voice, language, temperature, output format —
 because the fingerprint would not match otherwise.
 
@@ -468,8 +480,9 @@ place. Only what fails even then is left out, and every such passage is listed
 with its block and chapter in `<book> - missing text.txt` next to the output
 (`<book> - chybějící text.txt` with the Czech interface).
 
-**Fixing a passage.** *fix a passage*, next to *open output*, works on a finished
-file. Enter the time where you heard the problem; the block is found and its text
+**Fixing a passage.** *Fix this spot* in the player opens the dialog at the
+position being played; *fix a passage in a finished book…* on the opening screen
+works on any finished file. Enter the time where you heard the problem; the block is found and its text
 shown — after the pronunciation rewrites, so Czech *první* appears as *prvňí*.
 The text can be edited and is read exactly as
 written, so a stubborn word can be respelled for this one take. *generate again* makes a new take with the

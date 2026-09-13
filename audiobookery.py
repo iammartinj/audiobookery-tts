@@ -253,16 +253,16 @@ DEFAULT_CONFIG = {
     "orezat_okraje": True,
     "rychly_dekoder": False,
     "kontrola_asr": False,
-    # Sbalené sekce okna - na nízkém monitoru se bez toho nevejde spodek
-    "sbalene_sekce": {"poslech": False, "pokrocile": True, "prubeh": False},
+    # Podrobný průběh je sbalený - okno ukazuje převod a poslech, ne log
+    "sbalene_sekce": {"log": True},
+    # Barevné schéma: "tmave" nebo "svetle"
+    "tema": "tmave",
     "seed": 0,
     # Jazyk syntézy je nezávislý na jazyku rozhraní - v českém rozhraní
     # klidně vyrábíte anglickou audioknihu.
     "jazyk_textu": "en",
     "zarizeni": "auto",
     "testovaci_veta": "Dobrý den, toto je ukázka českého hlasu pro vaši audioknihu.",
-    "poslouchat": False,
-    "naskok_s": 120,
     "obalka": True,
     # 0 = odvodit od volné paměti karty
     "pracovniku": 0,
@@ -274,23 +274,40 @@ DEFAULT_CONFIG = {
 #  Vzhled - tmavá minimalistická paleta
 # --------------------------------------------------------------------------
 
-BARVY = {
-    "pozadi":    "#0e0e11",
-    "panel":     "#16161a",
-    "panel_svetlejsi": "#1f1f25",
-    "linka":     "#26262c",
-    "text":      "#e6e6ea",
-    # Obsah polí je o stupeň tlumenější než popisky - drží to hierarchii,
-    # aby cesty a názvy souborů nekřičely víc než struktura okna.
-    "text_pole": "#c4c4ce",
-    "tlacitko":  "#1e1e25",
-    "tlacitko_aktivni": "#2a2a33",
-    "tlumeny":   "#7d7d88",
-    "akcent":    "#7aa2f7",
-    "uspech":    "#7ee787",
-    "varovani":  "#f0883e",
-    "chyba":     "#f76f6f",
+# Dvě schémata podle návrhu. BARVY je jeden sdílený slovník - dialogy i log
+# si z něj berou barvy při stavbě. Přepnutí schématu ho přepíše a okno se
+# postaví znovu, stejně jako při změně jazyka.
+PALETY = {
+    "tmave": {
+        "pozadi": "#0e0e11", "panel": "#16161a", "pole": "#1a1a1f",
+        "tlacitko": "#1e1e25", "tlacitko_aktivni": "#2a2a33", "linka": "#22222a",
+        "text": "#f4f4f8", "text2": "#d2d2da", "tlumeny": "#a6a6b2",
+        "stopa": "#23232b", "stopa2": "#33333f", "akcent": "#7aa2f7",
+        "plocha": "#7aa2f7", "plocha_aktivni": "#93b4ff", "na_plose": "#12151c",
+        "zasoba": "#3f5a91", "chip": "#1b2334", "aktivni_radek": "#1a1d24",
+        "uspech": "#7ee787", "varovani": "#d9822b", "chyba": "#f76f6f", "cas_logu": "#5c5c68",
+    },
+    "svetle": {
+        "pozadi": "#eceef1", "panel": "#ffffff", "pole": "#eceef2",
+        "tlacitko": "#e6e8ec", "tlacitko_aktivni": "#d9dce2", "linka": "#e0e2e6",
+        "text": "#16181d", "text2": "#454951", "tlumeny": "#676c76",
+        "stopa": "#dde0e5", "stopa2": "#b9bec7", "akcent": "#5a6fd8",
+        # Velké plochy nesou ve světlém schématu inkoust, ne akcent - sytá
+        # barva na papíře křičí. Akcent zůstává jen v drobnostech.
+        "plocha": "#1c1e24", "plocha_aktivni": "#3a3d46", "na_plose": "#ffffff",
+        "zasoba": "#b9bec7", "chip": "#e6ecf6", "aktivni_radek": "#eef2f8",
+        "uspech": "#2e7d46", "varovani": "#b8641a", "chyba": "#c73a3a", "cas_logu": "#a2a6ae",
+    },
 }
+BARVY = dict(PALETY["tmave"])
+
+
+def nastav_paletu(tema: str) -> str:
+    """Přepne sdílené BARVY na zvolené schéma. Vrací platný název schématu."""
+    tema = tema if tema in PALETY else "tmave"
+    BARVY.clear()
+    BARVY.update(PALETY[tema])
+    return tema
 
 FONT_RODINA = "JetBrains Mono"
 FONT_ZALOHY = ("Cascadia Mono", "Consolas", "DejaVu Sans Mono", "Courier New")
@@ -567,6 +584,33 @@ def nacti_fb2_kapitoly(cesta: Path) -> list:
                 nadpis = " ".join(t.get_text(" ", strip=True).split())[:120]
             kapitoly.append({"nazev": nadpis, "text": text})
     return kapitoly
+
+
+def nacti_metadata(cesta: Path) -> dict:
+    """Název a autor z e-knihy. Co formát nenese, zůstane prázdné."""
+    vysledek = {"titul": "", "autor": ""}
+    pripona = cesta.suffix.lower()
+    if pripona == ".epub":
+        from ebooklib import epub
+
+        kniha = epub.read_epub(str(cesta))
+        for klic, pole in (("titul", "title"), ("autor", "creator")):
+            hodnoty = kniha.get_metadata("DC", pole)
+            vysledek[klic] = (hodnoty[0][0] or "").strip() if hodnoty else ""
+    elif pripona == ".fb2":
+        from bs4 import BeautifulSoup
+
+        obsah = cesta.read_text(encoding=detekuj_kodovani(cesta), errors="replace")
+        info = BeautifulSoup(obsah, "lxml-xml").find("title-info")
+        if info is not None:
+            titul = info.find("book-title")
+            vysledek["titul"] = titul.get_text(" ", strip=True) if titul else ""
+            autor = info.find("author")
+            if autor is not None:
+                vysledek["autor"] = " ".join(
+                    x.get_text(strip=True) for x in autor.find_all(["first-name", "middle-name", "last-name"])
+                    if x.get_text(strip=True))
+    return vysledek
 
 
 def nacti_kapitoly(cesta: Path):
@@ -1226,35 +1270,132 @@ def vytvor_obalku(nazev: str, cesta: Path, velikost: int = 600) -> bool:
         return False
 
 
-class Prehravac:
-    """Přehrává bloky během generování, s nastavitelným náskokem.
+OKNO_OBALKY_S = 0.1          # rozlišení obálky zvuku, ze které se kreslí vlna
 
-    Generování běží kolem 0,95x realtime, takže se náskok pomalu spotřebovává.
-    Proto se čeká, než se nashromáždí zadaná zásoba, a teprve pak se spustí zvuk.
-    Zásoba pak vydrží zhruba dvacetinásobek své délky.
+
+def precti_pcm(cesta: Path, od: int = 0, do: int = None):
+    """Mono 16bit PCM z WAV, který zapsala aplikace - i z rozepsaného.
+
+    Rozepsaný soubor má v hlavičce nulovou délku, proto se čte přímo za
+    kanonickou 44bajtovou hlavičkou, kterou píšou oba zapisovače.
+    """
+    import numpy as np
+
+    vzorku = max(0, (Path(cesta).stat().st_size - WavZapisovacRaw.HLAVICKA) // 2)
+    do = vzorku if do is None else min(int(do), vzorku)
+    od = max(0, int(od))
+    if do <= od:
+        return np.zeros(0, dtype="<i2")
+    with open(cesta, "rb") as f:
+        f.seek(WavZapisovacRaw.HLAVICKA + od * 2)
+        return np.frombuffer(f.read((do - od) * 2), dtype="<i2").copy()
+
+
+def delka_souboru_vzorku(cesta: Path, sr: int) -> int:
+    """Délka zvukového souboru ve vzorcích - WAV z hlavičky, MP3 přes ffprobe."""
+    cesta = Path(cesta)
+    if cesta.suffix.lower() == ".wav":
+        return max(0, (cesta.stat().st_size - WavZapisovacRaw.HLAVICKA) // 2)
+    vysledek = _spust([_ffprobe(), "-v", "error", "-show_entries", "format=duration",
+                       "-of", "default=noprint_wrappers=1:nokey=1", str(cesta)])
+    if vysledek.returncode != 0:
+        raise RuntimeError(vysledek.stderr.decode("utf-8", "replace").strip()[:300])
+    return int(float(vysledek.stdout.decode().strip()) * sr)
+
+
+def rms_oken(pcm, okno: int):
+    """RMS po oknech pevné délky. Neúplné poslední okno se vynechá."""
+    import numpy as np
+
+    pocet = len(pcm) // okno
+    if pocet <= 0:
+        return np.zeros(0, dtype="float32")
+    d = pcm[:pocet * okno].astype("float32").reshape(pocet, okno) / 32768.0
+    return np.sqrt((d * d).mean(axis=1)).astype("float32")
+
+
+def sloupce_vlny(obalka, okno: int, dostupno: int, osa: int, pocet: int):
+    """Výška (0 až 1) a dostupnost každého z 'pocet' sloupců přes osu 'osa' vzorků.
+
+    Osa může být delší než to, co už je vygenerované - zbytek kapitoly se
+    pak kreslí jako nízká linka.
+    """
+    vysky, dostupne = [], []
+    if pocet <= 0 or osa <= 0:
+        return vysky, dostupne
+    krok = osa / float(pocet)
+    for j in range(pocet):
+        od = int(j * krok)
+        if od >= dostupno or not len(obalka):
+            vysky.append(0.0)
+            dostupne.append(od < dostupno)
+            continue
+        do = min(int((j + 1) * krok), dostupno)
+        a = min(od // okno, len(obalka) - 1)
+        b = max(a + 1, min(len(obalka), -(-do // okno)))
+        # Odmocnina, protože RMS řeči se drží nízko a vlna by byla plochá
+        vysky.append(min(1.0, (float(obalka[a:b].max()) / 0.25) ** 0.5))
+        dostupne.append(True)
+    return vysky, dostupne
+
+
+def lidsky_cas(sekundy) -> str:
+    """'45 s', '19 min', '9 h 45 min' - pro souhrny, kde nejde o sekundy."""
+    if sekundy is None or sekundy != sekundy or sekundy < 0:
+        return "—"
+    s = int(round(sekundy))
+    if s < 60:
+        return f"{s} s"
+    minut = s // 60
+    if minut < 60:
+        return f"{minut} min"
+    return f"{minut // 60} h {minut % 60} min"
+
+
+def kratky_cas(sekundy) -> str:
+    """'24:49' nebo '1:02:03'."""
+    s = max(0, int(sekundy or 0))
+    h, zbytek = divmod(s, 3600)
+    m, s = divmod(zbytek, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+class Prehravac:
+    """Přehrává knihu po kapitolách přímo ze souborů výstupu.
+
+    Kapitola, která se hraje, se drží v paměti: hotová se jednou načte nebo
+    dekóduje, ta, která právě vzniká, se dočítá z rozepsaného WAV, jak
+    přibývají bloky. Proto jde skočit kamkoli do už vygenerovaného zvuku a
+    poslech nepotřebuje náskok - když dojede na živý konec, počká.
+
+    Kapitoly popisuje seznam slovníků: cesta, od a do (vzorky v souboru -
+    kniha bez rozpadu má všechny kapitoly v jednom souboru), hotova, roste
+    (právě se generuje) a odhad_s (délka podle textu, dokud není hotová).
     """
 
-    def __init__(self, vzorkovaci_frekvence: int, naskok_s: float, log_fn):
-        self.sr = vzorkovaci_frekvence
-        self.naskok_s = float(naskok_s)
+    KROK_S = 0.05
+
+    def __init__(self, sr: int, log_fn):
+        import numpy as np
+
+        self.sr = int(sr)
         self.log = log_fn
-
-        self.fronta = queue.Queue()
-        self.vlakno = None
-        self.stop_event = threading.Event()
-        self.pauza_event = threading.Event()
-        self.bezi = False
-        self.chyba = None
-
         self._zamek = threading.Lock()
-        self._sekund_ve_fronte = 0.0     # kolik audia čeká na přehrání
-        self._prehrano_s = 0.0
-        self._spusteno = False
-        self._vstup_uzavren = False
-        # Historie hlasitosti pro vizualizaci - jen ke čtení z GUI vlákna
-        self.hladiny = collections.deque(maxlen=160)
+        self._probud = threading.Event()
+        self._konec = threading.Event()
+        self.kapitoly = []
+        self.hrana = -1
+        self._data = np.zeros(0, dtype="<i2")
+        self._obalka = np.zeros(0, dtype="float32")
+        self._cesta_dat = None
+        self.pozice = 0
+        self.hraje = False
+        self.nacita = False
+        self.chyba = None
+        self._pozadavek = None          # (kapitola, pozice ve vzorcích, hrát, načíst znovu)
+        self._vlakno = threading.Thread(target=self._smycka, daemon=True)
+        self._vlakno.start()
 
-    # ------------------------------------------------------------------
     @staticmethod
     def dostupny() -> bool:
         try:
@@ -1263,167 +1404,285 @@ class Prehravac:
         except Exception:
             return False
 
+    @property
+    def okno(self) -> int:
+        return max(1, int(self.sr * OKNO_OBALKY_S))
+
+    @staticmethod
+    def _ma_zvuk(k) -> bool:
+        return bool(k["cesta"]) and (k["hotova"] or k["do"] > k["od"])
+
     # ------------------------------------------------------------------
-    def start(self) -> bool:
+    #  Stav kapitol - volá GUI vlákno
+    # ------------------------------------------------------------------
+    def nastav_kapitoly(self, odhady_s):
+        import numpy as np
+
+        with self._zamek:
+            self.kapitoly = [{"cesta": None, "od": 0, "do": 0, "hotova": False, "roste": False,
+                              "odhad_s": float(o)} for o in odhady_s]
+            self.hrana, self._cesta_dat, self.pozice, self.hraje = -1, None, 0, False
+            self._data = np.zeros(0, dtype="<i2")
+            self._obalka = np.zeros(0, dtype="float32")
+            self._pozadavek = None
+        self._probud.set()
+
+    def aktualizuj(self, kap_i: int, **zmeny):
+        with self._zamek:
+            if not 0 <= kap_i < len(self.kapitoly):
+                return
+            if zmeny.get("roste"):
+                for k in self.kapitoly:
+                    k["roste"] = False
+            self.kapitoly[kap_i].update(zmeny)
+        self._probud.set()
+
+    def prejmenuj(self, stara: str, nova: str):
+        """Hotová kapitola se převedla z WAV na MP3."""
+        with self._zamek:
+            for k in self.kapitoly:
+                if k["cesta"] and Path(k["cesta"]) == Path(stara):
+                    k["cesta"] = str(nova)
+        self._probud.set()
+
+    def ukonci_rust(self):
+        with self._zamek:
+            for k in self.kapitoly:
+                k["roste"] = False
+        self._probud.set()
+
+    def zneplatni(self, cesta):
+        """Soubor se změnil (oprava úseku) - hraná kapitola se načte znovu."""
+        with self._zamek:
+            for k in self.kapitoly:
+                if k["cesta"] and Path(k["cesta"]) == Path(cesta) and k["od"] == 0:
+                    k["do"] = 0          # doplní se po načtení
+            if self._cesta_dat and Path(self._cesta_dat) == Path(cesta):
+                self._pozadavek = (self.hrana, self.pozice, self.hraje, True)
+        self._probud.set()
+
+    def kapitola(self, kap_i: int):
+        with self._zamek:
+            return dict(self.kapitoly[kap_i]) if 0 <= kap_i < len(self.kapitoly) else None
+
+    def podpis(self):
+        """Stručný otisk stavu kapitol - GUI podle něj pozná, že má překreslit seznam."""
+        with self._zamek:
+            return tuple((k["cesta"], k["do"], k["hotova"], k["roste"]) for k in self.kapitoly)
+
+    def stav(self) -> dict:
+        with self._zamek:
+            k = self.kapitoly[self.hrana] if 0 <= self.hrana < len(self.kapitoly) else None
+            return {"kapitola": self.hrana if k else -1, "pozice_s": self.pozice / float(self.sr),
+                    "dostupno": len(self._data), "osa": self._osa(k), "obalka": self._obalka,
+                    "okno": self.okno, "hraje": self.hraje, "nacita": self.nacita,
+                    "roste": bool(k and k["roste"]), "od": k["od"] if k else 0,
+                    "cesta": k["cesta"] if k else None}
+
+    def _osa(self, k) -> int:
+        if k is None:
+            return 0
+        if k["hotova"] and not k["roste"]:
+            return max(len(self._data), 1)
+        return max(len(self._data), int(k["odhad_s"] * self.sr), 1)
+
+    # ------------------------------------------------------------------
+    #  Ovládání - volá GUI vlákno
+    # ------------------------------------------------------------------
+    def vyber(self, kap_i: int, sekundy: float = 0.0, hrat: bool = True):
+        with self._zamek:
+            self._pozadavek = (kap_i, int(sekundy * self.sr), hrat, False)
+        self._probud.set()
+
+    def prepni(self):
+        with self._zamek:
+            if self.hrana < 0:
+                kandidati = ([i for i, k in enumerate(self.kapitoly) if k["roste"]]
+                             + [i for i, k in enumerate(self.kapitoly) if self._ma_zvuk(k)])
+                if kandidati:
+                    self._pozadavek = (kandidati[0], 0, True, False)
+            else:
+                self.hraje = not self.hraje
+        self._probud.set()
+
+    def pozastav(self):
+        with self._zamek:
+            self.hraje = False
+        self._probud.set()
+
+    def posun(self, sekundy: float):
+        with self._zamek:
+            if self.hrana >= 0:
+                self.pozice = max(0, min(len(self._data), self.pozice + int(sekundy * self.sr)))
+        self._probud.set()
+
+    def skoc(self, podil: float):
+        """Skok na podíl osy kapitoly - jen do už vygenerovaného zvuku."""
+        with self._zamek:
+            if self.hrana >= 0:
+                osa = self._osa(self.kapitoly[self.hrana])
+                self.pozice = max(0, min(len(self._data), int(podil * osa)))
+        self._probud.set()
+
+    def dalsi(self, smer: int):
+        with self._zamek:
+            if self.hrana < 0:
+                return
+            i = self.hrana + smer
+            while 0 <= i < len(self.kapitoly) and not self._ma_zvuk(self.kapitoly[i]):
+                i += smer
+            if 0 <= i < len(self.kapitoly):
+                self._pozadavek = (i, 0, self.hraje, False)
+        self._probud.set()
+
+    def na_zive(self):
+        with self._zamek:
+            rostouci = [i for i, k in enumerate(self.kapitoly) if k["roste"]]
+            if rostouci:
+                self._pozadavek = (rostouci[0], -1, True, False)
+        self._probud.set()
+
+    def zastav(self):
+        self._konec.set()
+        self._probud.set()
+        self._vlakno.join(timeout=2.0)
+
+    # ------------------------------------------------------------------
+    #  Vlákno přehrávače
+    # ------------------------------------------------------------------
+    def _smycka(self):
         try:
             import sounddevice as sd
         except Exception as chyba:
-            self.chyba = f"sounddevice není k dispozici ({chyba})"
-            self.log(T("log_poslech_vyp", self.chyba))
-            return False
-
-        try:
-            zarizeni = sd.query_devices(sd.default.device[1])
-            self.log(T("log_poslech_zar", zarizeni["name"].strip(), int(self.naskok_s)))
-        except Exception:
-            pass
-
-        self.bezi = True
-        self.vlakno = threading.Thread(target=self._smycka, daemon=True)
-        self.vlakno.start()
-        return True
-
-    # ------------------------------------------------------------------
-    def pridej(self, vzorky, ticho_ms: int = 0):
-        """Zařadí blok do fronty k přehrání. Nikdy neblokuje generování."""
-        if not self.bezi:
-            return
-        import numpy as np
-
-        data = np.asarray(vzorky, dtype="float32").reshape(-1)
-        if ticho_ms > 0:
-            data = np.concatenate([data, np.zeros(int(self.sr * ticho_ms / 1000.0),
-                                                  dtype="float32")])
-        with self._zamek:
-            self._sekund_ve_fronte += len(data) / float(self.sr)
-        self.fronta.put(data)
-
-    # ------------------------------------------------------------------
-    @property
-    def zasoba_s(self) -> float:
-        with self._zamek:
-            return self._sekund_ve_fronte
-
-    @property
-    def prehrano_s(self) -> float:
-        with self._zamek:
-            return self._prehrano_s
-
-    @property
-    def ceka_na_naskok(self) -> bool:
-        return self.bezi and not self._spusteno
-
-    @property
-    def pozastaveno(self) -> bool:
-        return self.pauza_event.is_set()
-
-    def prepni_pauzu(self) -> bool:
-        """Vrátí nový stav: True = pozastaveno."""
-        if self.pauza_event.is_set():
-            self.pauza_event.clear()
-        else:
-            self.pauza_event.set()
-        return self.pauza_event.is_set()
-
-    # ------------------------------------------------------------------
-    def _smycka(self):
-        import numpy as np
-        import sounddevice as sd
-
+            sd = None
+            self.chyba = str(chyba)
         proud = None
-        try:
-            # Čekáme na náskok, ať přehrávání nezačne dřív, než má z čeho žít.
-            # Pozor: hlídat i konec vstupu, jinak by u textu kratšího než náskok
-            # čekání nikdy neskončilo - a fronta přitom plná dat.
-            while not self.stop_event.is_set():
-                if self.zasoba_s >= self.naskok_s or self._vstup_uzavren:
-                    break
-                time.sleep(0.2)
+        krok = max(1, int(self.sr * self.KROK_S))
+        while not self._konec.is_set():
+            try:
+                with self._zamek:
+                    pozadavek, self._pozadavek = self._pozadavek, None
+                if pozadavek is not None:
+                    self._nacti(*pozadavek)
+                self._dopln()
 
-            if self.stop_event.is_set():
-                return
-
-            self._spusteno = True
-            zasoba = self.zasoba_s
-            if zasoba < self.naskok_s:
-                self.log(T("log_poslech_kratky", round(zasoba)))
-            else:
-                self.log(T("log_poslech_start", round(zasoba)))
-
-            proud = sd.OutputStream(samplerate=self.sr, channels=1, dtype="float32")
-            proud.start()
-
-            while not self.stop_event.is_set():
-                try:
-                    blok = self.fronta.get(timeout=0.3)
-                except queue.Empty:
-                    if self._konec_vstupu():
-                        break
+                with self._zamek:
+                    hraje = self.hraje and sd is not None
+                    kus = self._data[self.pozice:self.pozice + krok] if hraje else None
+                    if kus is not None:
+                        self.pozice += len(kus)
+                if kus is not None and len(kus):
+                    if proud is None:
+                        proud = sd.OutputStream(samplerate=self.sr, channels=1, dtype="int16")
+                        proud.start()
+                    proud.write(kus.reshape(-1, 1))
                     continue
 
-                if blok is None:          # signál konce
-                    break
-
-                # Zapisujeme po desetinách sekundy - zastavení pak nemusí čekat
-                # na dohrání celého bloku a zároveň z toho máme data na vizualizaci.
-                krok = int(self.sr * 0.1)
-                for zacatek in range(0, len(blok), krok):
-                    if self.stop_event.is_set():
-                        break
-
-                    # Pauza poslechu: proud se zastaví, ať karta nehlásí podtečení.
-                    # Generování běží dál, takže se mezitím jen zvětšuje zásoba.
-                    while self.pauza_event.is_set() and not self.stop_event.is_set():
-                        if proud.active:
-                            proud.stop()
-                        time.sleep(0.1)
-                    if self.stop_event.is_set():
-                        break
-                    if not proud.active:
-                        proud.start()
-
-                    kousek = blok[zacatek:zacatek + krok]
-                    proud.write(kousek)          # blokuje, dokud karta neodebere
-                    self.hladiny.append(float(np.sqrt((kousek.astype("float64") ** 2).mean()))
-                                        if kousek.size else 0.0)
-                    delka = len(kousek) / float(self.sr)
-                    with self._zamek:
-                        self._sekund_ve_fronte = max(0.0, self._sekund_ve_fronte - delka)
-                        self._prehrano_s += delka
-
-        except Exception as chyba:
-            self.chyba = str(chyba)
-            self.log(T("log_poslech_chyba", chyba))
-        finally:
-            if proud is not None:
-                try:
+                if proud is not None:
                     proud.stop()
                     proud.close()
-                except Exception:
-                    pass
-            self.bezi = False
+                    proud = None
+                if hraje:
+                    self._na_konci_kapitoly()
+                self._probud.wait(0.1)
+                self._probud.clear()
+            except Exception as chyba:
+                self.chyba = str(chyba)
+                self.log(T("log_poslech_chyba", chyba))
+                with self._zamek:
+                    self.hraje = False
+                if proud is not None:
+                    proud.abort()
+                    proud.close()
+                    proud = None
+                time.sleep(0.5)
+        if proud is not None:
+            proud.abort()
+            proud.close()
 
-    def _konec_vstupu(self) -> bool:
-        return self._vstup_uzavren and self.fronta.empty()
+    def _nacti(self, kap_i: int, pozice: int, hrat: bool, znovu: bool):
+        with self._zamek:
+            if not 0 <= kap_i < len(self.kapitoly):
+                return
+            k = dict(self.kapitoly[kap_i])
+            sdileny = sum(1 for x in self.kapitoly if x["cesta"] == k["cesta"]) > 1
+            stejna = kap_i == self.hrana and self._cesta_dat == k["cesta"] and not znovu
+            if not k["cesta"]:
+                return
+            if not stejna:
+                self.nacita = True
+                self.hraje = False
+        if not stejna:
+            data = self._precti(k, sdileny)
+            with self._zamek:
+                self.hrana, self._data, self._cesta_dat = kap_i, data, k["cesta"]
+                self._obalka = rms_oken(data, self.okno)
+                if not sdileny and self.kapitoly[kap_i]["hotova"]:
+                    self.kapitoly[kap_i]["do"] = self.kapitoly[kap_i]["od"] + len(data)
+                self.nacita = False
+        with self._zamek:
+            if pozice < 0:
+                pozice = len(self._data) - 2 * self.sr
+            self.pozice = max(0, min(len(self._data), pozice))
+            self.hraje = hrat
 
-    # ------------------------------------------------------------------
-    def uzavri_vstup(self):
-        """Generování skončilo. Vlákno dohraje zbytek fronty a samo doběhne."""
-        self._vstup_uzavren = True
-        self.fronta.put(None)
+    def _precti(self, k: dict, sdileny: bool):
+        cesta = Path(k["cesta"])
+        od, do = int(k["od"]), int(k["do"])
+        if cesta.suffix.lower() == ".wav":
+            return precti_pcm(cesta, od, do if do > od else None)
+        pcm = dekoduj_zvuk(cesta, self.sr)
+        # MP3 kapitoly je celý soubor. Délka se od WAV liší o pár vzorků
+        # vycpávky, proto se řeže jen tam, kde soubor sdílí víc kapitol.
+        return pcm[od:do] if sdileny and do > od else pcm
 
-    def zastav(self):
-        """Okamžité ukončení - zbytek fronty se zahodí."""
-        self.stop_event.set()
-        self.pauza_event.clear()      # ať čekací smyčka nezůstane viset
-        self._vstup_uzavren = True
+    def _dopln(self):
+        """Dočte bloky, které mezitím přibyly do rozepsané hrané kapitoly."""
+        import numpy as np
+
+        with self._zamek:
+            if self.hrana < 0 or self._pozadavek is not None:
+                return
+            k = self.kapitoly[self.hrana]
+            chybi = (k["do"] - k["od"]) - len(self._data)
+            if k["cesta"] != self._cesta_dat:
+                # Hotová kapitola se převedla na MP3. Když už je v paměti celá,
+                # stačí si poznamenat nový soubor - zvuk je stejný.
+                if chybi <= 0:
+                    self._cesta_dat = k["cesta"]
+                else:
+                    self._pozadavek = (self.hrana, self.pozice, self.hraje, True)
+                return
+            if chybi <= 0 or Path(k["cesta"]).suffix.lower() != ".wav":
+                return
+            cesta, od = k["cesta"], k["od"] + len(self._data)
         try:
-            self.fronta.put_nowait(None)
-        except Exception:
-            pass
-        if self.vlakno is not None:
-            self.vlakno.join(timeout=3.0)
-        self.bezi = False
+            nove = precti_pcm(Path(cesta), od, od + chybi)
+        except FileNotFoundError:
+            return                       # právě se převádí na MP3, přijde přejmenování
+        if not len(nove):
+            return
+        with self._zamek:
+            if self._cesta_dat != cesta:
+                return
+            self._data = np.concatenate([self._data, nove])
+            self._obalka = rms_oken(self._data, self.okno)
+
+    def _na_konci_kapitoly(self):
+        with self._zamek:
+            if self.hrana < 0 or self.pozice < len(self._data):
+                return
+            k = self.kapitoly[self.hrana]
+            if k["roste"] or len(self._data) < k["do"] - k["od"]:
+                return                   # čeká se na další blok
+            dalsi = self.hrana + 1
+            if dalsi < len(self.kapitoly):
+                if self._ma_zvuk(self.kapitoly[dalsi]):
+                    self._pozadavek = (dalsi, 0, True, False)
+                    return
+                if self.kapitoly[dalsi]["roste"]:
+                    return               # další kapitola teprve začíná
+            self.hraje = False
 
 
 def formatuj_cas(sekundy: float) -> str:
@@ -2657,97 +2916,306 @@ def uloz_zvuk(cesta: Path, pcm, sr: int, bitrate: str = "") -> Path:
     return zaloha
 
 
-class DialogRozdelane(tk.Toplevel):
-    """Nabídka rozdělaných převodů. Vrací vybraný záznam, nebo None."""
+def zkrat_text(text: str, font, sirka: int) -> str:
+    """Zkrátí text se třemi tečkami tak, aby se vešel do 'sirka' bodů."""
+    text = text or ""
+    if sirka <= 8 or font.measure(text) <= sirka:
+        return text
+    dole, nahore = 0, len(text)
+    while dole < nahore:
+        stred = (dole + nahore + 1) // 2
+        if font.measure(text[:stred] + "…") <= sirka:
+            dole = stred
+        else:
+            nahore = stred - 1
+    return text[:dole] + "…"
 
-    def __init__(self, rodic, zaznamy, font_rodina):
-        super().__init__(rodic)
-        self.vybrany = None
-        self._zaznamy = zaznamy
 
-        self.title(T("dlg_rozdelane"))
-        self.configure(background=BARVY["pozadi"])
-        self.transient(rodic)
+def kdy_text(cas: float) -> str:
+    """'dnes 16:41', 'včera 16:41', jinak '8. 9. 21:02'."""
+    import datetime
+
+    kdy = datetime.datetime.fromtimestamp(cas)
+    dnes = datetime.date.today()
+    hodiny = kdy.strftime("%H:%M")
+    if kdy.date() == dnes:
+        return T("kdy_dnes", hodiny)
+    if kdy.date() == dnes - datetime.timedelta(days=1):
+        return T("kdy_vcera", hodiny)
+    return T("kdy_datum", kdy.day, kdy.month, hodiny)
+
+
+class Tlacitko(tk.Label):
+    """Ploché tlačítko podle návrhu: 'tlacitko', 'plocha' (hlavní akce) nebo 'odkaz'."""
+
+    def __init__(self, rodic, text, command, druh="tlacitko", font=None, bg_rodice=None,
+                 padx=17, pady=10):
+        self._druh, self._command, self._povoleno = druh, command, True
+        self._bg_rodice = bg_rodice or BARVY["panel"]
+        super().__init__(rodic, text=text, font=font, padx=padx, pady=pady, bd=0,
+                         highlightthickness=0, cursor="hand2")
+        self._obarvi()
+        self.bind("<Button-1>", self._klik)
+        self.bind("<Enter>", lambda _u: self._obarvi(najeto=True))
+        self.bind("<Leave>", lambda _u: self._obarvi())
+
+    def _obarvi(self, najeto=False):
+        b = BARVY
+        najeto = najeto and self._povoleno
+        if self._druh == "plocha":
+            bg = b["plocha_aktivni"] if najeto else (b["plocha"] if self._povoleno else b["stopa2"])
+            fg = b["na_plose"]
+        elif self._druh == "odkaz":
+            bg = self._bg_rodice
+            fg = (b["text"] if najeto else b["akcent"]) if self._povoleno else b["tlumeny"]
+        else:
+            bg = b["tlacitko_aktivni"] if najeto else b["tlacitko"]
+            fg = b["text"] if self._povoleno else b["tlumeny"]
+        self.configure(bg=bg, fg=fg, cursor="hand2" if self._povoleno else "arrow")
+
+    def _klik(self, _u=None):
+        if self._povoleno and self._command:
+            self._command()
+
+    def povol(self, ano: bool):
+        self._povoleno = bool(ano)
+        self._obarvi()
+
+    def text(self, text: str):
+        if self.cget("text") != text:
+            self.configure(text=text)
+
+
+class Chip(tk.Label):
+    """Přepínač v podobě štítku. Zapnutý je tónovaný a v akcentu."""
+
+    def __init__(self, rodic, text, promenna=None, command=None, font=None, padx=11, pady=6):
+        super().__init__(rodic, text=text, font=font, padx=padx, pady=pady, bd=0, cursor="hand2")
+        self._promenna, self._command, self._povoleno = promenna, command, True
+        self.bind("<Button-1>", self._klik)
+        self.obarvi()
+
+    def obarvi(self):
+        zapnuto = bool(self._promenna.get()) if self._promenna is not None else False
+        self.configure(bg=BARVY["chip"] if zapnuto else BARVY["pole"],
+                       fg=BARVY["akcent"] if zapnuto else BARVY["tlumeny"],
+                       cursor="hand2" if self._povoleno else "arrow")
+
+    def _klik(self, _u=None):
+        if not self._povoleno:
+            return
+        if self._promenna is not None:
+            self._promenna.set(not self._promenna.get())
+        if self._command:
+            self._command()
+        self.obarvi()
+
+    def povol(self, ano: bool):
+        self._povoleno = bool(ano)
+        self.obarvi()
+
+
+class Ikona(tk.Canvas):
+    """Tlačítko s kreslenou ikonou. Glyfy ⏮ ☀ ☾ přibalené písmo nemá."""
+
+    def __init__(self, rodic, druh, command, velikost=36, kruh=False, font=None, bg_rodice=None):
+        super().__init__(rodic, width=velikost, height=velikost, highlightthickness=0, bd=0,
+                         bg=bg_rodice or BARVY["panel"], cursor="hand2")
+        self.druh, self._command, self._v, self._kruh, self._font = druh, command, velikost, kruh, font
+        self._povoleno, self._najeto = True, False
+        self.bind("<Button-1>", lambda _u: self._povoleno and self._command and self._command())
+        self.bind("<Enter>", lambda _u: self._hover(True))
+        self.bind("<Leave>", lambda _u: self._hover(False))
+        self.kresli()
+
+    def _hover(self, ano):
+        self._najeto = ano
+        self.kresli()
+
+    def nastav(self, druh: str):
+        if druh != self.druh:
+            self.druh = druh
+            self.kresli()
+
+    def povol(self, ano: bool):
+        if bool(ano) != self._povoleno:
+            self._povoleno = bool(ano)
+            self.configure(cursor="hand2" if ano else "arrow")
+            self.kresli()
+
+    def _tvary(self, podklad: str, ink: str) -> list:
+        """Ikona jako seznam tvarů (druh, souřadnice, barva[, tloušťka])."""
+        import math
+
+        v, d = self._v, self.druh
+        c, s = v / 2.0, v / 36.0
+        tvary = [("ovál" if self._kruh else "obdélník", (0, 0, v, v), podklad)]
+        if d == "hrat":
+            tvary.append(("mnohoúhelník", (c - 4 * s, c - 7 * s, c - 4 * s, c + 7 * s, c + 8 * s, c), ink))
+        elif d == "pauza":
+            for x in (c - 5 * s, c + 2 * s):
+                tvary.append(("obdélník", (x, c - 7 * s, x + 3 * s, c + 7 * s), ink))
+        elif d in ("predchozi", "dalsi"):
+            znamenko = -1 if d == "predchozi" else 1
+            kraj = c + znamenko * 6 * s
+            tvary.append(("obdélník", (min(kraj, kraj + znamenko * 2 * s), c - 6 * s,
+                                       max(kraj, kraj + znamenko * 2 * s), c + 6 * s), ink))
+            tvary.append(("mnohoúhelník", (c - znamenko * 6 * s, c - 6 * s,
+                                           c - znamenko * 6 * s, c + 6 * s, kraj, c), ink))
+        elif d == "slunce":
+            r = 3.5 * s
+            tvary.append(("ovál", (c - r, c - r, c + r, c + r), ink))
+            for i in range(8):
+                u = i * math.pi / 4
+                tvary.append(("čára", (c + math.cos(u) * 6 * s, c + math.sin(u) * 6 * s,
+                                       c + math.cos(u) * 8.5 * s, c + math.sin(u) * 8.5 * s), ink, 1.4 * s))
+        elif d == "mesic":
+            r = 6.5 * s
+            tvary.append(("ovál", (c - r, c - r, c + r, c + r), ink))
+            tvary.append(("ovál", (c - r + 4.5 * s, c - r - 2 * s, c + r + 4.5 * s, c + r - 2 * s), podklad))
+        return tvary
+
+    def kresli(self):
+        b, v, d = BARVY, self._v, self.druh
+        self.delete("all")
+        najeto = self._najeto and self._povoleno
+        if self._kruh:
+            podklad, ink = (b["plocha_aktivni"] if najeto else b["plocha"]), b["na_plose"]
+        else:
+            zaklad = b["pole"] if d in ("slunce", "mesic") else b["tlacitko"]
+            podklad = b["tlacitko_aktivni"] if najeto else zaklad
+            ink = b["tlumeny"] if d in ("slunce", "mesic") else b["text2"]
+        if not self._povoleno:
+            ink = b["stopa2"]
+
+        # Tk kreslí kruhy a šikmé hrany bez vyhlazení, takže jsou zubaté.
+        # Ikona se proto kreslí přes Pillow ve čtyřnásobku a zmenší se.
+        from PIL import Image, ImageDraw, ImageTk
+
+        k = 4
+        obr = Image.new("RGB", (v * k, v * k), self.cget("bg"))
+        kresba = ImageDraw.Draw(obr)
+        for druh, body, barva, *tloustka in self._tvary(podklad, ink):
+            body = [x * k for x in body]
+            if druh == "ovál":
+                kresba.ellipse([body[0], body[1], body[2] - 1, body[3] - 1], fill=barva)
+            elif druh == "obdélník":
+                kresba.rectangle([body[0], body[1], body[2] - 1, body[3] - 1], fill=barva)
+            elif druh == "mnohoúhelník":
+                kresba.polygon(body, fill=barva)
+            else:
+                kresba.line(body, fill=barva, width=max(1, int(tloustka[0] * k)))
+        self._foto = ImageTk.PhotoImage(obr.resize((v, v), Image.LANCZOS), master=self)
+        self.create_image(0, 0, anchor="nw", image=self._foto)
+        if d in ("zpet", "vpred"):
+            self.create_text(v / 2.0, v / 2.0, text="−15" if d == "zpet" else "+30",
+                             fill=ink, font=self._font)
+
+
+class ZkracenyPopisek(tk.Label):
+    """Popisek, který dlouhý text (cestu, název) zkrátí třemi tečkami na šířku sloupce."""
+
+    def __init__(self, rodic, font, **kw):
+        kw.setdefault("anchor", "w")
+        kw.setdefault("width", 1)
+        super().__init__(rodic, font=font, **kw)
+        self._plny, self._font = "", font
+        self.bind("<Configure>", lambda _u: self._zkrat())
+
+    def nastav(self, text: str):
+        if text != self._plny:
+            self._plny = text or ""
+            self._zkrat()
+
+    def _zkrat(self):
+        kratky = zkrat_text(self._plny, self._font, self.winfo_width() - 4)
+        if self.cget("text") != kratky:
+            self.configure(text=kratky)
+
+
+class DialogPokrocile(tk.Toplevel):
+    """Pokročilé nastavení. Hodnoty jdou rovnou do proměnných hlavního okna."""
+
+    def __init__(self, app, zamceno: bool):
+        super().__init__(app)
+        b, f, px = BARVY, app.F, app.px
+        self.title(T("dlg_pokrocile"))
+        self.configure(background=b["panel"])
+        self.transient(app)
         self.resizable(False, False)
 
-        ramec = ttk.Frame(self, padding=(22, 18, 22, 16))
+        ramec = tk.Frame(self, bg=b["panel"], padx=px(22), pady=px(18))
         ramec.pack(fill="both", expand=True)
+        ramec.columnconfigure(1, weight=1, minsize=px(220))
+        radek = [0]
 
-        ttk.Label(ramec, text=T("dlg_rozdelane_popis"),
-                  style="Tlumeny.TLabel").pack(anchor="w", pady=(0, 12))
+        def popisek(text):
+            tk.Label(ramec, text=text, font=f["pole"], bg=b["panel"], fg=b["text2"], anchor="w").grid(
+                row=radek[0], column=0, sticky="w", padx=(0, px(16)), pady=px(5))
 
-        seznam = tk.Frame(ramec, background=BARVY["panel"])
-        seznam.pack(fill="both", expand=True)
+        def posuvnik(text, promenna, od, do):
+            popisek(text)
+            hodnota = tk.Label(ramec, font=f["pole"], bg=b["panel"], fg=b["akcent"], width=5, anchor="e",
+                               text=f"{promenna.get():.2f}")
+            meritko = ttk.Scale(ramec, from_=od, to=do, variable=promenna,
+                                command=lambda _h: hodnota.configure(text=f"{promenna.get():.2f}"))
+            meritko.grid(row=radek[0], column=1, sticky="ew")
+            hodnota.grid(row=radek[0], column=2, sticky="e", padx=(px(10), 0))
+            if zamceno:
+                meritko.state(["disabled"])
+            radek[0] += 1
 
-        self.box = tk.Listbox(
-            seznam, height=min(10, max(3, len(zaznamy))), width=68,
-            font=(font_rodina, 9), activestyle="none",
-            background=BARVY["panel"], foreground=BARVY["text"],
-            selectbackground=BARVY["akcent"], selectforeground=BARVY["pozadi"],
-            relief="flat", borderwidth=0, highlightthickness=0)
-        self.box.pack(side="left", fill="both", expand=True, padx=10, pady=8)
-        posuv = ttk.Scrollbar(seznam, orient="vertical", command=self.box.yview,
-                              style="Tenky.Vertical.TScrollbar")
-        posuv.pack(side="right", fill="y")
-        self.box.configure(yscrollcommand=posuv.set)
+        def cislo(text, promenna, od, do, krok):
+            popisek(text)
+            ttk.Spinbox(ramec, from_=od, to=do, increment=krok, textvariable=promenna, width=8,
+                        state="disabled" if zamceno else "normal").grid(row=radek[0], column=1, sticky="w")
+            radek[0] += 1
 
-        for z in zaznamy:
-            kdy = time.strftime("%d.%m. %H:%M", time.localtime(z["kdy"]))
-            self.box.insert("end",
-                            f"  {z['nazev'][:34]:36} {z['procenta']:5.1f} %   "
-                            f"{z['hotovo']}/{z['celkem']}   {kdy}")
-        if zaznamy:
-            self.box.selection_set(0)
-        self.box.bind("<Double-Button-1>", lambda _u: self._potvrd())
+        posuvnik(T("lab_expresivita"), app.var_exag, 0.25, 1.0)
+        posuvnik(T("lab_cfg"), app.var_cfg, 0.0, 1.0)
+        posuvnik(T("lab_teplota"), app.var_temp, 0.05, 1.5)
+        posuvnik(T("lab_min_p"), app.var_min_p, 0.0, 0.30)
+        tk.Frame(ramec, height=1, bg=b["linka"]).grid(row=radek[0], column=0, columnspan=3,
+                                                       sticky="ew", pady=px(12))
+        radek[0] += 1
+        cislo(T("lab_znaku"), app.var_max_znaku, 80, 400, 10)
+        cislo(T("lab_pauza_ms"), app.var_pauza, 0, 2000, 50)
+        cislo(T("lab_seed"), app.var_seed, 0, 999999, 1)
+        cislo(T("lab_pracovniku"), app.var_pracovniku, 0, 4, 1)
+        popisek(T("lab_zarizeni"))
+        ttk.Combobox(ramec, textvariable=app.var_zarizeni, width=7, values=["auto", "cuda", "cpu"],
+                     state="disabled" if zamceno else "readonly").grid(row=radek[0], column=1, sticky="w")
+        radek[0] += 1
 
-        self.popis = ttk.Label(ramec, text="", style="Tlumeny.TLabel", wraplength=520)
-        self.popis.pack(anchor="w", pady=(10, 0))
-        self.box.bind("<<ListboxSelect>>", lambda _u: self._obnov_popis())
-        self._obnov_popis()
+        tk.Frame(ramec, height=1, bg=b["linka"]).grid(row=radek[0], column=0, columnspan=3,
+                                                       sticky="ew", pady=px(12))
+        radek[0] += 1
+        volba = tk.Frame(ramec, bg=b["panel"])
+        volba.grid(row=radek[0], column=0, columnspan=3, sticky="w")
+        Chip(volba, T("lab_kontrola_asr"), app.var_kontrola_asr, font=f["maly"]).pack(side="left")
+        radek[0] += 1
+        tk.Label(ramec, text=T("hint_asr_stazeno") if asr_stazeny() else T("hint_asr_stahne", ASR_GB),
+                 font=f["popis"], bg=b["panel"], fg=b["tlumeny"], anchor="w", justify="left",
+                 wraplength=px(420)).grid(row=radek[0], column=0, columnspan=3, sticky="w", pady=(px(6), 0))
+        radek[0] += 1
+        if zamceno:
+            for dite in volba.winfo_children():
+                dite.povol(False)
 
-        tlacitka = ttk.Frame(ramec)
-        tlacitka.pack(fill="x", pady=(16, 0))
-        ttk.Button(tlacitka, text=T("btn_pokracovat_prevod"), style="Akce.TButton",
-                   command=self._potvrd).pack(side="left")
-        ttk.Button(tlacitka, text=T("btn_zrusit"), style="Tichy.TButton",
-                   command=self._zrus).pack(side="left", padx=(10, 0))
+        Tlacitko(ramec, T("btn_zavrit"), self.destroy, font=f["pole"], padx=px(16), pady=px(8)).grid(
+            row=radek[0], column=0, columnspan=3, sticky="e", pady=(px(18), 0))
 
-        self.protocol("WM_DELETE_WINDOW", self._zrus)
-        self.bind("<Escape>", lambda _u: self._zrus())
-        self.bind("<Return>", lambda _u: self._potvrd())
-
+        self.bind("<Escape>", lambda _u: self.destroy())
         self.update_idletasks()
-        x = rodic.winfo_rootx() + (rodic.winfo_width() - self.winfo_width()) // 2
-        y = rodic.winfo_rooty() + 120
-        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+        x = app.winfo_rootx() + (app.winfo_width() - self.winfo_width()) // 2
+        self.geometry(f"+{max(0, x)}+{max(0, app.winfo_rooty() + px(80))}")
         self.grab_set()
-        self.box.focus_set()
-
-    def _obnov_popis(self):
-        vyber = self.box.curselection()
-        if not vyber:
-            self.popis.config(text="")
-            return
-        z = self._zaznamy[vyber[0]]
-        zdroj = Path(z["zdroj"]).name if z.get("zdroj") else "?"
-        chybi = "" if (not z.get("zdroj") or Path(z["zdroj"]).exists()) else T("dlg_zdroj_chybi")
-        self.popis.config(text=f"{T('dlg_zdroj')}: {zdroj}   ·   {z['cesta'].parent}{chybi}")
-
-    def _potvrd(self):
-        vyber = self.box.curselection()
-        if vyber:
-            self.vybrany = self._zaznamy[vyber[0]]
-        self.destroy()
-
-    def _zrus(self):
-        self.vybrany = None
-        self.destroy()
 
 
 class DialogOprava(tk.Toplevel):
     """Najde blok podle času, vygeneruje ho znovu a vymění v hotovém souboru."""
 
-    def __init__(self, app, slozka: Path):
+    def __init__(self, app, slozka: Path, soubor: Path = None, cas: float = None):
         super().__init__(app)
         self.app = app
         self.slozka = Path(slozka)
@@ -2763,6 +3231,7 @@ class DialogOprava(tk.Toplevel):
         self.sr = 24000
         self.nove = None
         self.novy_text = ""
+        self.nahrazene = []        # soubory, které se změnily - přehrávač je načte znovu
 
         self.title(T("dlg_oprava"))
         self.configure(background=BARVY["pozadi"])
@@ -2836,7 +3305,10 @@ class DialogOprava(tk.Toplevel):
         x = app.winfo_rootx() + (app.winfo_width() - self.winfo_width()) // 2
         self.geometry(f"+{max(0, x)}+{max(0, app.winfo_rooty() + 120)}")
         self.grab_set()
-        self._nabidni_soubory()
+        self._nabidni_soubory(Path(soubor).name if soubor else "")
+        if cas is not None and self.zaznamy:
+            self.var_cas.set(kratky_cas(cas))
+            self._najdi()
         self.after(120, self._zpracuj_frontu)
 
     # ------------------------------------------------------------------
@@ -3074,6 +3546,7 @@ class DialogOprava(tk.Toplevel):
                         dalsi["od"] += posun
                     self.pcm = pcm
                     self.mapa.prepis(self.hlavicka, self.vsechny)
+                    self.nahrazene.append(self.soubor)
                     self.app.log(T("log_oprava", self.soubor.name, z["blok"]))
                     self.prace = False
                     self._ukaz(self.aktualni)
@@ -3096,20 +3569,21 @@ class Aplikace(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        # Konfigurace se musí načíst dřív než cokoli s textem - jazyk se
-        # uplatní hned na titulku okna, ne až u prvního popisku.
+        # Konfigurace se musí načíst dřív než cokoli s textem - jazyk i barvy
+        # se uplatní hned na titulku a prvním widgetu.
         self.config_data = self._nacti_config()
         nastav_jazyk(self.config_data.get("jazyk", "en"))
+        self.tema = nastav_paletu(self.config_data.get("tema", "tmave"))
 
         self.title(f"{T('app_nazev')} v{VERSION}")
-        # Na nízkém monitoru se okno o pevných 980 bodech nevejde a ovládání
-        # i průběh zůstanou pod hranou obrazovky. Výška se proto řídí obrazovkou;
-        # sbalenými sekcemi jde okno zkrátit, takže minimum může být nízko.
-        sirka = min(1000, self.winfo_screenwidth() - 40)
-        vyska = min(980, self.winfo_screenheight() - 100)
+        self._meritko = max(1.0, self.winfo_fpixels("1i") / 96.0)
+        # Velikost podle návrhu, ale nikdy větší než obrazovka - na 13" MacBooku
+        # nebo notebooku s měřítkem se jinak spodek okna vůbec neukázal. Obsah
+        # se posouvá, takže minimum může být malé a nic se neztratí pod hranou.
+        sirka = min(self.px(1320), self.winfo_screenwidth() - 60)
+        vyska = min(self.px(980), self.winfo_screenheight() - 120)
         self.geometry(f"{sirka}x{vyska}")
-        # Řada ovládání s opravou úseku potřebuje v češtině 904 bodů plus okraje
-        self.minsize(min(960, sirka), min(480, vyska))
+        self.minsize(min(self.px(640), sirka), min(self.px(460), vyska))
 
         self.fronta = queue.Queue()
         self.vlakno = None
@@ -3121,12 +3595,23 @@ class Aplikace(tk.Tk):
         self.kapitoly = []
         self.ma_kapitoly = False
         self.nazev_knihy = ""
+        self.titul_knihy = ""
+        self.autor_knihy = ""
         self.bezi = False
-        self.prehravac = None
-        self.obalka_cesta = None      # ať přežije přestavbu okna při změně jazyka
+        # nezahajeno / bezi / pozastaveno / dokonceno / zastaveno / chyba
+        self.stav_prevodu = "nezahajeno"
+        self.obalka_cesta = None
+        self.vysledek_cesta = None
         # Kopie, ne odkaz do DEFAULT_CONFIG - ten je sdílený
         self.sbalene_sekce = dict(self.config_data.get("sbalene_sekce") or {})
-        self._kapitola_v_behu = -1     # kapitola, kterou právě ukazuje druhý pruh
+        self.nastaveni_otevrene = False
+        self.filtr_kapitol = "vse"
+        self.pocet_chyb = 0
+        self._log_radky = []          # přežijí přestavbu okna
+        self._prevod = {}             # čísla právě běžícího převodu pro kartu stavu
+        self._stav_text = ""
+        self._gui_hotove = False
+        self.prehravac = Prehravac(24000, self.log_z_vlakna)
 
         self._vytvor_promenne()
         self._vytvor_gui()
@@ -3134,8 +3619,7 @@ class Aplikace(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self.pri_zavreni)
         self.after(100, self._zpracuj_frontu)
-        self.after(500, self._aktualizuj_poslech)
-        self.after(300, self._vykresli_hladinu)
+        self.after(250, self._obnov_prehravac)
 
         self.log(f"{T('app_nazev')} v{VERSION}")
         self.log(T("log_cache", CACHE_DIR))
@@ -3145,6 +3629,13 @@ class Aplikace(tk.Tk):
             self.log(T("log_ffmpeg"))
         if not Prehravac.dostupny():
             self.log(T("log_sd"))
+        # Kniha z minula se načte sama, ať úvodní obrazovka rovnou ukáže, co převede
+        if self.var_vstup.get().strip('" ') and Path(self.var_vstup.get().strip('" ')).exists():
+            self.after(150, lambda: self.nacti_a_priprav(tise=True))
+
+    def px(self, n: float) -> int:
+        """Rozměr z návrhu (px při 100 %) přepočtený na DPI obrazovky."""
+        return int(round(n * self._meritko))
 
     # ------------------------------------------------------------------
     #  Konfigurace
@@ -3186,11 +3677,10 @@ class Aplikace(tk.Tk):
             "jazyk_textu": self._klic_jazyka_textu(),
             "zarizeni": self.var_zarizeni.get(),
             "testovaci_veta": self.var_test_veta.get(),
-            "poslouchat": bool(self.var_poslouchat.get()),
-            "naskok_s": int(self.var_naskok.get()),
             "obalka": bool(self.var_obalka.get()),
             "pracovniku": int(self.var_pracovniku.get()),
             "jazyk": aktualni_jazyk(),
+            "tema": self.tema,
             "sbalene_sekce": dict(self.sbalene_sekce),
         }
         try:
@@ -3206,8 +3696,6 @@ class Aplikace(tk.Tk):
 
     def _nazev_jazyka_textu(self, klic: str) -> str:
         j = jazyk_podle_klice(klic)
-        if j.get("zdroj") == "finetune":
-            return f"{j['nazev']} ({j['kod']}) +{j.get('velikost_gb', 2.1):.1f} GB"
         return f"{j['nazev']} ({j['kod']})"
 
     def _klic_jazyka_textu(self) -> str:
@@ -3230,12 +3718,15 @@ class Aplikace(tk.Tk):
     def _popis_jazyka(self):
         """Krátká věta o tom, co zvolený jazyk obnáší - stažení, kvalita, rizika."""
         j = jazyk_podle_klice(self._klic_jazyka_textu())
+        self._jazyk_stazeny = True
         if j.get("zdroj") != "finetune":
             self.var_jazyk_info.set(T("jaz_zakladni"))
             return
 
         stazeny = self._stazeny(j)
-        casti = [T("jaz_stazeno") if stazeny else T("jaz_stahne", j.get("velikost_gb", 2.1))]
+        self._jazyk_stazeny = stazeny
+        velikost = j.get("velikost_gb", 2.1)
+        casti = [T("jaz_stazeno_gb", velikost) if stazeny else T("jaz_stahne", velikost)]
         if not j.get("overeno", False):
             casti.append(T("jaz_neovereno"))
         if not j.get("token", True):
@@ -3267,411 +3758,660 @@ class Aplikace(tk.Tk):
         self.var_jazyk_textu = tk.StringVar(value=self._nazev_jazyka_textu(c["jazyk_textu"]))
         self.var_zarizeni = tk.StringVar(value=c["zarizeni"])
         self.var_test_veta = tk.StringVar(value=c["testovaci_veta"])
-        self.var_poslouchat = tk.BooleanVar(value=c["poslouchat"])
-        self.var_naskok = tk.IntVar(value=c["naskok_s"])
         self.var_obalka = tk.BooleanVar(value=c["obalka"])
         self.var_pracovniku = tk.IntVar(value=c["pracovniku"])
 
         self.var_stav = tk.StringVar(value=T("stav_pripraveno"))
-        self.var_postup = tk.DoubleVar(value=0.0)
-        self.var_postup_kapitola = tk.DoubleVar(value=0.0)
-        self.var_kapitola_info = tk.StringVar(value="")
-        self.var_bloky_info = tk.StringVar(value="—/—")
-        self.var_cas_info = tk.StringVar(value="—:—:—  /  —:—:—")
         self.var_jazyk = tk.StringVar(value=JAZYKY.get(aktualni_jazyk(), "English"))
         self.var_jazyk_info = tk.StringVar(value="")
-        self.var_soubor_info = tk.StringVar(value=T("info_zadny"))
-        self.var_poslech_info = tk.StringVar(value="")
+        self.var_soubor_info = tk.StringVar(value="")
+
+        # Stopy na proměnných, ne na widgetech - okno se při změně jazyka nebo
+        # schématu staví znovu a stopa na zničeném widgetu by padala.
+        for promenna in (self.var_vstup, self.var_ref_wav, self.var_vystup_slozka,
+                         self.var_vystup_nazev, self.var_format, self.var_bitrate,
+                         self.var_obalka, self.var_lupance, self.var_orez,
+                         self.var_rychly_dekoder, self.var_pauza, self.var_jazyk_textu):
+            promenna.trace_add("write", lambda *_a: self._po_zmene_nastaveni())
+        self.var_vystup_slozka.trace_add("write", lambda *_a: self._odlozene_rozdelane())
 
     def _obnov_z_configu(self):
-        self._aktualizuj_popisky_posuvniku()
         self._popis_jazyka()
+        self._po_zmene_nastaveni()
 
     # ------------------------------------------------------------------
-    #  Sestavení GUI
+    #  Sestavení okna
     # ------------------------------------------------------------------
+    def _nastav_fonty(self):
+        """Velikosti z návrhu (px) převedené na body, ať se škálují s DPI."""
+        from tkinter import font as tkfont
+
+        def font(body, tucne=False):
+            return tkfont.Font(root=self, family=self.font_rodina, size=body,
+                               weight="bold" if tucne else "normal")
+
+        self.F = {"logo": font(11, True), "verze": font(9), "titul": font(15, True),
+                  "nadpis": font(11, True), "pole": font(10), "pole_t": font(10, True),
+                  "popis": font(9), "maly": font(9), "stitek": font(8), "log": font(9),
+                  "odznak": font(8, True), "tlacitko_t": font(10, True), "cislo": font(10)}
+        # Dialog opravy úseku a starší kód počítají s těmito jmény
+        self.F_BEZNY, self.F_MALY, self.F_TITULEK = self.F["pole"], self.F["popis"], self.F["stitek"]
+
     def _vytvor_gui(self):
+        self._gui_hotove = False
         self.font_rodina = nacti_font()
-        self.F_BEZNY = (self.font_rodina, 10)
-        self.F_MALY = (self.font_rodina, 8)
-        self.F_TITULEK = (self.font_rodina, 8)
-
-        self.configure(background=BARVY["pozadi"])
         self._nastav_pojmenovane_fonty()
+        self._nastav_fonty()
         self._nastav_styl()
-
-        # Widgety, ktere se behem prevodu zamykaji (item: nemenit format za behu)
+        b, f, px = BARVY, self.F, self.px
+        self.configure(background=b["pozadi"])
         self.zamykatelne = []
-
-        hlavni = ttk.Frame(self, padding=(26, 22, 26, 20))
-        hlavni.pack(fill="both", expand=True)
-        hlavni.columnconfigure(0, weight=1)
+        self._okraj, self._mezera = px(18), px(13)
 
         # ---------------- Hlavička ----------------
-        zahlavi = ttk.Frame(hlavni)
-        zahlavi.pack(fill="x", pady=(0, 22))
-        ttk.Label(zahlavi, text=T("znacka"), style="Nadpis.TLabel").pack(side="left")
-        ttk.Label(zahlavi, text=T("podtitul", self._kod_jazyka_textu(), VERSION),
-                  style="Tlumeny.TLabel").pack(side="left", padx=(12, 0))
-
-        vyber = ttk.Combobox(zahlavi, textvariable=self.var_jazyk, width=9, state="readonly",
+        hlavicka = tk.Frame(self, bg=b["panel"], padx=px(18), pady=px(8))
+        hlavicka.pack(side="top", fill="x")
+        tk.Label(hlavicka, text=T("znacka"), font=f["logo"], bg=b["panel"], fg=b["text"]).pack(side="left")
+        tk.Label(hlavicka, text=T("podtitul", VERSION), font=f["verze"], bg=b["panel"],
+                 fg=b["tlumeny"]).pack(side="left", padx=(px(12), 0))
+        vyber = ttk.Combobox(hlavicka, textvariable=self.var_jazyk, width=9, state="readonly",
                              values=[JAZYKY[k] for k in ("en", "cs")])
         vyber.pack(side="right")
         vyber.bind("<<ComboboxSelected>>", lambda _u: self.zmen_jazyk())
-        ttk.Label(zahlavi, text=T("lab_jazyk"), style="Tlumeny.TLabel").pack(
-            side="right", padx=(0, 10))
+        self.btn_tema = Ikona(hlavicka, "mesic" if self.tema == "svetle" else "slunce",
+                              self.prepni_tema, velikost=px(32), bg_rodice=b["panel"])
+        self.btn_tema.pack(side="right", padx=(0, px(12)))
+        tk.Frame(self, height=1, bg=b["linka"]).pack(side="top", fill="x")
 
-        # ---------------- Kniha ----------------
-        kniha = self._sekce(hlavni, T("sekce_kniha"))
-        rada = ttk.Frame(kniha)
-        rada.grid(row=0, column=0, sticky="ew")
-        rada.columnconfigure(0, weight=1)
-        e = ttk.Entry(rada, textvariable=self.var_vstup)
-        e.grid(row=0, column=0, sticky="ew")
-        b1 = ttk.Button(rada, text=T("btn_vybrat"), command=self.vyber_vstup, style="Tichy.TButton")
-        b1.grid(row=0, column=1, padx=(8, 0))
-        b2 = ttk.Button(rada, text=T("btn_nacist"), command=self.nacti_a_priprav, style="Tichy.TButton")
-        b2.grid(row=0, column=2, padx=(6, 0))
-        self._zamknout(e, b1, b2)
-
-        rada = ttk.Frame(kniha)
-        rada.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        ttk.Label(rada, text=T("lab_jazyk_textu")).pack(side="left", padx=(0, 12))
-        vyber_jaz = ttk.Combobox(rada, textvariable=self.var_jazyk_textu, width=26,
-                                 state="readonly", values=self._nabidka_jazyku())
-        vyber_jaz.pack(side="left")
-        vyber_jaz.bind("<<ComboboxSelected>>", lambda _u: self._popis_jazyka())
-        self._zamknout(vyber_jaz)
-        ttk.Label(rada, textvariable=self.var_jazyk_info,
-                  style="Tlumeny.TLabel").pack(side="left", padx=(14, 0))
-
-        ttk.Label(kniha, textvariable=self.var_soubor_info,
-                  style="Tlumeny.TLabel").grid(row=2, column=0, sticky="w", pady=(10, 0))
-
-        # ---------------- Hlas ----------------
-        hlas = self._sekce(hlavni, T("sekce_hlas"))
-        rada = ttk.Frame(hlas)
-        rada.grid(row=0, column=0, sticky="ew")
-        rada.columnconfigure(0, weight=1)
-        e = ttk.Entry(rada, textvariable=self.var_ref_wav)
-        e.grid(row=0, column=0, sticky="ew")
-        b1 = ttk.Button(rada, text=T("btn_vybrat"), command=self.vyber_ref_wav, style="Tichy.TButton")
-        b1.grid(row=0, column=1, padx=(8, 0))
-        b2 = ttk.Button(rada, text="×", command=lambda: self.var_ref_wav.set(""),
-                        style="Tichy.TButton", width=3)
-        b2.grid(row=0, column=2, padx=(6, 0))
-        self._zamknout(e, b1, b2)
-
-        rada = ttk.Frame(hlas)
-        rada.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        rada.columnconfigure(0, weight=1)
-        e = ttk.Entry(rada, textvariable=self.var_test_veta)
-        e.grid(row=0, column=0, sticky="ew")
-        self.btn_test = ttk.Button(rada, text=T("btn_test"), command=self.test_hlasu,
-                                   style="Tichy.TButton")
-        self.btn_test.grid(row=0, column=1, padx=(8, 0))
-        self._zamknout(e)
-
-        # ---------------- Výstup ----------------
-        vystup = self._sekce(hlavni, T("sekce_vystup"))
-        rada = ttk.Frame(vystup)
-        rada.grid(row=0, column=0, sticky="ew")
-        rada.columnconfigure(0, weight=1)
-        e = ttk.Entry(rada, textvariable=self.var_vystup_slozka)
-        e.grid(row=0, column=0, sticky="ew")
-        b1 = ttk.Button(rada, text=T("btn_vybrat"), command=self.vyber_vystup, style="Tichy.TButton")
-        b1.grid(row=0, column=1, padx=(8, 0))
-        self._zamknout(e, b1)
-
-        rada = ttk.Frame(vystup)
-        rada.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        rada.columnconfigure(0, weight=1)
-        e = ttk.Entry(rada, textvariable=self.var_vystup_nazev)
-        e.grid(row=0, column=0, sticky="ew")
-        r1 = ttk.Radiobutton(rada, text="wav", variable=self.var_format, value="WAV")
-        r1.grid(row=0, column=1, padx=(14, 0))
-        r2 = ttk.Radiobutton(rada, text="mp3", variable=self.var_format, value="MP3")
-        r2.grid(row=0, column=2, padx=(8, 0))
-        c1 = ttk.Combobox(rada, textvariable=self.var_bitrate, width=5, state="readonly",
-                          values=["96k", "128k", "160k", "192k"])
-        c1.grid(row=0, column=3, padx=(8, 0))
-        self._zamknout(e, r1, r2, c1)
-
-        # ---------------- Poslech ----------------
-        poslech = self._sekce_sbalitelna(hlavni, T("sekce_poslech"), sbaleno=False, klic="poslech")
-        rada = ttk.Frame(poslech)
-        rada.grid(row=0, column=0, sticky="ew")
-        ttk.Checkbutton(rada, text=T("lab_prehravat"), variable=self.var_poslouchat,
-                        command=self.prepni_poslech).pack(side="left")
-        ttk.Label(rada, text=T("lab_naskok")).pack(side="left", padx=(28, 12))
-        sp = ttk.Spinbox(rada, from_=15, to=1800, increment=15,
-                         textvariable=self.var_naskok, width=7)
-        sp.pack(side="left")
-        self._zamknout(sp)
-
-        self.btn_poslech_pauza = ttk.Button(rada, text=T("btn_poslech_pauza"),
-                                            command=self.prepni_pauzu_poslechu,
-                                            style="Tichy.TButton", state="disabled")
-        self.btn_poslech_pauza.pack(side="left", padx=(28, 0))
-
-        # Vizualizace: obálka vlevo, hladina vpravo
-        vizu = ttk.Frame(poslech)
-        vizu.grid(row=1, column=0, sticky="ew", pady=(12, 0))
-        vizu.columnconfigure(1, weight=1)
-
-        self.platno_obalka = tk.Canvas(vizu, width=104, height=104, highlightthickness=0,
-                                       background=BARVY["panel"], borderwidth=0)
-        self.platno_obalka.grid(row=0, column=0, sticky="w")
-        self.platno_obalka.create_text(52, 52, text="—", fill=BARVY["linka"],
-                                       font=(self.font_rodina, 20))
-        # Po přestavbě okna (změna jazyka) je plátno nové - obálku vrátíme zpět
-        drive = getattr(self, "obalka_cesta", None)
-        if drive is not None and Path(drive).exists():
-            self.after(0, lambda: self.zobraz_obalku(Path(drive)))
-
-        self.platno_hladina = tk.Canvas(vizu, height=104, highlightthickness=0,
-                                        background=BARVY["panel"], borderwidth=0)
-        self.platno_hladina.grid(row=0, column=1, sticky="ew", padx=(12, 0))
-
-        ttk.Label(poslech, textvariable=self.var_poslech_info,
-                  style="Tlumeny.TLabel").grid(row=2, column=0, sticky="w", pady=(10, 0))
-
-        # ---------------- Pokročilé (sbaleno) ----------------
-        gen = self._sekce_sbalitelna(hlavni, T("sekce_pokrocile"), klic="pokrocile")
-        gen.columnconfigure(1, weight=1)
-
-        self.popisky_posuvniku = {}
-
-        def posuvnik(radek, popis, promenna, od, do, klic):
-            ttk.Label(gen, text=popis).grid(row=radek, column=0, sticky="w", padx=(0, 14), pady=3)
-            sk = ttk.Scale(gen, from_=od, to=do, variable=promenna,
-                           command=lambda _e: self._aktualizuj_popisky_posuvniku())
-            sk.grid(row=radek, column=1, sticky="ew", padx=(0, 12))
-            popisek = ttk.Label(gen, text="", width=5, style="Hodnota.TLabel")
-            popisek.grid(row=radek, column=2, sticky="w", padx=(0, 28))
-            self.popisky_posuvniku[klic] = (popisek, promenna)
-            self._zamknout(sk)
-
-        def cislo(radek, popis, promenna, od, do, krok):
-            ttk.Label(gen, text=popis).grid(row=radek, column=3, sticky="w", padx=(0, 12), pady=3)
-            sp = ttk.Spinbox(gen, from_=od, to=do, increment=krok, textvariable=promenna, width=7)
-            sp.grid(row=radek, column=4, sticky="w")
-            self._zamknout(sp)
-
-        posuvnik(0, T("lab_expresivita"), self.var_exag, 0.25, 1.0, "exag")
-        posuvnik(1, T("lab_cfg"), self.var_cfg, 0.0, 1.0, "cfg")
-        posuvnik(2, T("lab_teplota"), self.var_temp, 0.05, 1.5, "temp")
-        posuvnik(3, T("lab_min_p"), self.var_min_p, 0.0, 0.30, "minp")
-        cislo(0, T("lab_znaku"), self.var_max_znaku, 80, 400, 10)
-        cislo(1, T("lab_pauza_ms"), self.var_pauza, 0, 2000, 50)
-        cislo(2, T("lab_seed"), self.var_seed, 0, 999999, 1)
-
-        # Dva řádky - v jednom se to do okna širokého 1000 bodů nevešlo
-        spodek = ttk.Frame(gen)
-        spodek.grid(row=4, column=0, columnspan=5, sticky="ew", pady=(14, 0))
-        ttk.Label(spodek, text=T("lab_zarizeni")).pack(side="left", padx=(0, 12))
-        cb = ttk.Combobox(spodek, textvariable=self.var_zarizeni, width=6, state="readonly",
-                          values=["auto", "cuda", "cpu"])
-        cb.pack(side="left")
-        ttk.Label(spodek, text=T("lab_pracovniku")).pack(side="left", padx=(28, 12))
-        sp_w = ttk.Spinbox(spodek, from_=0, to=4, increment=1,
-                           textvariable=self.var_pracovniku, width=5)
-        sp_w.pack(side="left")
-
-        volby = ttk.Frame(gen)
-        volby.grid(row=5, column=0, columnspan=5, sticky="ew", pady=(10, 0))
-        ch2 = ttk.Checkbutton(volby, text=T("lab_obalka"), variable=self.var_obalka)
-        ch2.pack(side="left")
-        ch3 = ttk.Checkbutton(volby, text=T("lab_lupance"), variable=self.var_lupance)
-        ch3.pack(side="left", padx=(28, 0))
-        ch4 = ttk.Checkbutton(volby, text=T("lab_orez"), variable=self.var_orez)
-        ch4.pack(side="left", padx=(28, 0))
-        self._zamknout(cb, ch2, ch3, ch4, sp_w)
-
-        # Vlastní řádek - vedle je potřeba říct, co zapnutí stojí
-        rada_rd = ttk.Frame(gen)
-        rada_rd.grid(row=6, column=0, columnspan=5, sticky="ew", pady=(10, 0))
-        ch5 = ttk.Checkbutton(rada_rd, text=T("lab_rychly_dekoder"),
-                              variable=self.var_rychly_dekoder)
-        ch5.pack(side="left")
-        ttk.Label(rada_rd, text=T("hint_rd_stazeno") if rychly_dekoder_stazeny()
-                  else T("hint_rd_stahne", RYCHLY_DEKODER_GB),
-                  style="Tlumeny.TLabel").pack(side="left", padx=(14, 0))
-        self._zamknout(ch5)
-
-        rada_asr = ttk.Frame(gen)
-        rada_asr.grid(row=7, column=0, columnspan=5, sticky="ew", pady=(10, 0))
-        ch6 = ttk.Checkbutton(rada_asr, text=T("lab_kontrola_asr"),
-                              variable=self.var_kontrola_asr)
-        ch6.pack(side="left")
-        ttk.Label(rada_asr, text=T("hint_asr_stazeno") if asr_stazeny()
-                  else T("hint_asr_stahne", ASR_GB),
-                  style="Tlumeny.TLabel").pack(side="left", padx=(14, 0))
-        self._zamknout(ch6)
-
-        # ---------------- Ovládání ----------------
-        ovladani = ttk.Frame(hlavni)
-        ovladani.pack(fill="x", pady=(6, 0))
-
-        self.btn_start = ttk.Button(ovladani, text=T("btn_start"),
-                                    command=self.spust_prevod, style="Akce.TButton")
-        self.btn_start.pack(side="left")
-        self.btn_navazat = ttk.Button(ovladani, text=T("btn_navazat"),
-                                      command=self.pokracuj_v_rozdelanem,
-                                      style="Tichy.TButton")
-        self.btn_navazat.pack(side="left", padx=(10, 0))
-        self.btn_pauza = ttk.Button(ovladani, text=T("btn_pauza"), command=self.prepni_pauzu,
-                                    style="Tichy.TButton", state="disabled")
-        self.btn_pauza.pack(side="left", padx=(10, 0))
-        self.btn_stop = ttk.Button(ovladani, text=T("btn_zastavit"), command=self.zastav,
-                                   style="Tichy.TButton", state="disabled")
-        self.btn_stop.pack(side="left", padx=(6, 0))
-        ttk.Button(ovladani, text=T("btn_otevrit"), command=self.otevri_vystup,
-                   style="Tichy.TButton").pack(side="right")
-        ttk.Button(ovladani, text=T("btn_oprava"), command=self.oprav_usek,
-                   style="Tichy.TButton").pack(side="right", padx=(0, 10))
-
-        # ---------------- Průběh ----------------
-        postup = ttk.Frame(hlavni)
-        postup.pack(fill="x", pady=(16, 0))
-        postup.columnconfigure(0, weight=1)
-
-        ttk.Progressbar(postup, variable=self.var_postup, maximum=100.0,
-                        style="Tenky.Horizontal.TProgressbar").grid(
-            row=0, column=0, columnspan=3, sticky="ew")
-        # Hranice kapitol. Na ttk.Progressbar se kreslit nedá, takže rysky jsou
-        # na vlastním plátně hned pod ním - šířka i měřítko sedí.
-        self.platno_kapitol = tk.Canvas(postup, height=6, highlightthickness=0,
-                                        background=BARVY["pozadi"], borderwidth=0)
-        self.platno_kapitol.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(2, 0))
-        self.platno_kapitol.bind("<Configure>", lambda _u: self._vykresli_rysky_kapitol())
-        # Druhý pruh sleduje jen právě převáděnou kapitolu
-        self.pruh_kapitoly = ttk.Progressbar(postup, variable=self.var_postup_kapitola, maximum=100.0,
-                                             style="Tenky.Horizontal.TProgressbar")
-        self.pruh_kapitoly.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 0))
-        ttk.Label(postup, textvariable=self.var_stav).grid(row=3, column=0, sticky="w", pady=(8, 0))
-        ttk.Label(postup, textvariable=self.var_bloky_info, style="Tlumeny.TLabel").grid(
-            row=3, column=1, sticky="e", padx=(16, 16), pady=(8, 0))
-        ttk.Label(postup, textvariable=self.var_cas_info, style="Tlumeny.TLabel").grid(
-            row=3, column=2, sticky="e", pady=(8, 0))
-        self.popisek_kapitoly = ttk.Label(postup, textvariable=self.var_kapitola_info,
-                                          style="Tlumeny.TLabel")
-        self.popisek_kapitoly.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
-        self._aktualizuj_pruh_kapitol()
-
-        # ---------------- Log ----------------
-        ramec_log = self._sekce_sbalitelna(hlavni, T("sekce_prubeh"), sbaleno=False,
-                                           roztahnout=True, mezera_nahore=20, klic="prubeh")
-        ramec_log.columnconfigure(0, weight=1)
-        ramec_log.rowconfigure(0, weight=1)
-
-        self.log_box = tk.Text(
-            ramec_log, height=8, wrap="word", state="disabled",
-            font=(self.font_rodina, 9),
-            background=BARVY["panel"], foreground=BARVY["tlumeny"],
-            insertbackground=BARVY["text"], selectbackground=BARVY["panel_svetlejsi"],
-            selectforeground=BARVY["text"],
-            relief="flat", borderwidth=0, highlightthickness=0,
-            padx=14, pady=12, spacing1=1,
-        )
-        self.log_box.grid(row=0, column=0, sticky="nsew")
-        posuv = ttk.Scrollbar(ramec_log, orient="vertical", command=self.log_box.yview,
+        # ---------------- Posuvná plocha ----------------
+        telo = tk.Frame(self, bg=b["pozadi"])
+        telo.pack(side="top", fill="both", expand=True)
+        self.platno = tk.Canvas(telo, bg=b["pozadi"], highlightthickness=0, bd=0,
+                                yscrollincrement=px(20))
+        posuv = ttk.Scrollbar(telo, orient="vertical", command=self.platno.yview,
                               style="Tenky.Vertical.TScrollbar")
+        self.platno.configure(yscrollcommand=posuv.set)
+        posuv.pack(side="right", fill="y")
+        self.platno.pack(side="left", fill="both", expand=True)
+        self.obsah = tk.Frame(self.platno, bg=b["pozadi"])
+        self.obsah.columnconfigure(0, weight=1)
+        self._okno_obsahu = self.platno.create_window(0, 0, window=self.obsah, anchor="nw")
+        self.obsah.bind("<Configure>",
+                        lambda _u: self.platno.configure(scrollregion=self.platno.bbox("all")))
+        self.platno.bind("<Configure>", self._pri_zmene_velikosti)
+        for udalost in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.bind_all(udalost, self._kolecko)
+
+        self._vytvor_nastaveni(self.obsah)
+        self.oblast_start = tk.Frame(self.obsah, bg=b["pozadi"])
+        self.oblast_start.columnconfigure(0, weight=1)
+        self._vytvor_start(self.oblast_start)
+        self.oblast_prevod = tk.Frame(self.obsah, bg=b["pozadi"])
+        self.levy = tk.Frame(self.oblast_prevod, bg=b["pozadi"])
+        self.pravy = tk.Frame(self.oblast_prevod, bg=b["pozadi"])
+        self.levy.columnconfigure(0, weight=1)
+        self.pravy.columnconfigure(0, weight=1)
+        self._vytvor_stav(self.levy)
+        self._vytvor_prehravac(self.levy)
+        self._vytvor_kapitoly(self.pravy)
+        # Log je jeden a podle stavu se přesouvá: na úvodní obrazovce pod
+        # kartami, během převodu do levého sloupce (grid -in).
+        self.karta_log = self._vytvor_log(self.obsah)
+
+        self._gui_hotove = True
+        self._rozlozeni = None
+        self._podpis_seznamu = None
+        self._obnov_log_z_pameti()
+        self._prepni_zobrazeni()
+        self._po_zmene_nastaveni()
+        self._obnov_rozdelane()
+        self._obnov_stav()
+        if self.obalka_cesta is not None and Path(self.obalka_cesta).exists():
+            self.after(0, lambda: self.zobraz_obalku(Path(self.obalka_cesta)))
+
+    # ---------------- Pruh nastavení ----------------
+    def _vytvor_nastaveni(self, rodic):
+        b, f, px = BARVY, self.F, self.px
+        karta = tk.Frame(rodic, bg=b["panel"])
+        karta.grid(row=0, column=0, sticky="ew", padx=self._okraj, pady=(px(14), 0))
+        karta.columnconfigure(0, weight=1)
+        self.karta_nastaveni = karta
+
+        radek = tk.Frame(karta, bg=b["panel"], padx=px(16), pady=px(10), cursor="hand2")
+        radek.columnconfigure(1, weight=1)
+        self.radek_souhrn = radek
+        stitek = tk.Label(radek, text=T("stitek_nastaveni"), font=f["stitek"], bg=b["panel"], fg=b["tlumeny"])
+        stitek.grid(row=0, column=0, sticky="w", padx=(0, px(14)))
+        self.lbl_souhrn = ZkracenyPopisek(radek, f["popis"], bg=b["panel"], fg=b["text2"])
+        self.lbl_souhrn.grid(row=0, column=1, sticky="ew")
+        self.lbl_upravit = tk.Label(radek, font=f["popis"], bg=b["panel"], fg=b["akcent"])
+        self.lbl_upravit.grid(row=0, column=2, sticky="e", padx=(px(14), 0))
+        for w in (radek, stitek, self.lbl_souhrn, self.lbl_upravit):
+            w.bind("<Button-1>", lambda _u: self._prepni_nastaveni())
+
+        self.telo_nastaveni = tk.Frame(karta, bg=b["panel"], padx=px(18), pady=px(18))
+        self.sloupce_nastaveni = [self._sloupec_zdroj(self.telo_nastaveni),
+                                  self._sloupec_hlas(self.telo_nastaveni),
+                                  self._sloupec_vystup(self.telo_nastaveni)]
+
+    def _sloupec(self, rodic, stitek: str):
+        s = tk.Frame(rodic, bg=BARVY["panel"])
+        s.columnconfigure(0, weight=1)
+        tk.Label(s, text=stitek, font=self.F["stitek"], bg=BARVY["panel"], fg=BARVY["tlumeny"],
+                 anchor="w").grid(row=0, column=0, sticky="w")
+        s.radek = 1
+        return s
+
+    def _popisek_pole(self, sloupec, text: str):
+        tk.Label(sloupec, text=text, font=self.F["popis"], bg=BARVY["panel"], fg=BARVY["tlumeny"],
+                 anchor="w").grid(row=sloupec.radek, column=0, sticky="w",
+                                  pady=(self.px(14), self.px(6)))
+        sloupec.radek += 1
+
+    def _pole(self, sloupec, text: str, vnitrni_okraj=True):
+        """Popisek a pod ním podbarvené pole. Vrací rámeček pole."""
+        self._popisek_pole(sloupec, text)
+        barva = BARVY["pole"] if vnitrni_okraj else BARVY["panel"]
+        pole = tk.Frame(sloupec, bg=barva, padx=self.px(11) if vnitrni_okraj else 0,
+                        pady=self.px(8) if vnitrni_okraj else 0)
+        pole.grid(row=sloupec.radek, column=0, sticky="ew")
+        pole.columnconfigure(0, weight=1)
+        sloupec.radek += 1
+        return pole
+
+    def _radek_pod(self, sloupec, pady=6):
+        radek = tk.Frame(sloupec, bg=BARVY["panel"])
+        radek.grid(row=sloupec.radek, column=0, sticky="ew", pady=(self.px(pady), 0))
+        radek.columnconfigure(0, weight=1)
+        sloupec.radek += 1
+        return radek
+
+    def _odkaz(self, rodic, text, command, bg=None, font=None):
+        return Tlacitko(rodic, text, command, druh="odkaz", font=font or self.F["pole"],
+                        bg_rodice=bg or BARVY["panel"], padx=0, pady=0)
+
+    def _sloupec_zdroj(self, rodic):
+        b, f, px = BARVY, self.F, self.px
+        s = self._sloupec(rodic, T("stitek_zdroj"))
+        pole = self._pole(s, T("lab_kniha"))
+        self.lbl_kniha = ZkracenyPopisek(pole, f["pole"], bg=b["pole"], fg=b["text"])
+        self.lbl_kniha.grid(row=0, column=0, sticky="ew")
+        self.odkaz_kniha = self._odkaz(pole, T("btn_zmenit"), self.vyber_vstup, bg=b["pole"])
+        self.odkaz_kniha.grid(row=0, column=1, padx=(px(10), 0))
+        self.lbl_kniha_cesta = ZkracenyPopisek(self._radek_pod(s), f["popis"], bg=b["panel"], fg=b["tlumeny"])
+        self.lbl_kniha_cesta.grid(row=0, column=0, sticky="ew")
+
+        pole = self._pole(s, T("lab_jazyk_textu"), vnitrni_okraj=False)
+        vyber = ttk.Combobox(pole, textvariable=self.var_jazyk_textu, state="readonly",
+                             values=self._nabidka_jazyku(), width=1)
+        vyber.grid(row=0, column=0, sticky="ew")
+        vyber.bind("<<ComboboxSelected>>", lambda _u: self._popis_jazyka())
+        self._zamknout(vyber)
+        self.lbl_jazyk_info = ZkracenyPopisek(self._radek_pod(s), f["maly"], bg=b["panel"], fg=b["uspech"])
+        self.lbl_jazyk_info.grid(row=0, column=0, sticky="ew")
+        return s
+
+    def _sloupec_hlas(self, rodic):
+        b, f, px = BARVY, self.F, self.px
+        s = self._sloupec(rodic, T("stitek_hlas"))
+        pole = self._pole(s, T("lab_nahravka"))
+        self.lbl_hlas = ZkracenyPopisek(pole, f["pole"], bg=b["pole"], fg=b["text"])
+        self.lbl_hlas.grid(row=0, column=0, sticky="ew")
+        self.odkaz_hlas = self._odkaz(pole, T("btn_zmenit"), self.vyber_ref_wav, bg=b["pole"])
+        self.odkaz_hlas.grid(row=0, column=1, padx=(px(10), 0))
+        self.odkaz_hlas_pryc = self._odkaz(pole, "×", lambda: self.var_ref_wav.set(""), bg=b["pole"])
+        self.odkaz_hlas_pryc.grid(row=0, column=2, padx=(px(10), 0))
+        self.lbl_hlas_cesta = ZkracenyPopisek(self._radek_pod(s), f["popis"], bg=b["panel"], fg=b["tlumeny"])
+        self.lbl_hlas_cesta.grid(row=0, column=0, sticky="ew")
+
+        pole = self._pole(s, T("lab_zkusebni_veta"), vnitrni_okraj=False)
+        veta = ttk.Entry(pole, textvariable=self.var_test_veta, width=1)
+        veta.grid(row=0, column=0, sticky="ew")
+        self._zamknout(veta)
+        self.btn_test = Tlacitko(pole, T("btn_prehrat"), self.test_hlasu, font=f["maly"],
+                                 padx=px(14), pady=px(8))
+        self.btn_test.grid(row=0, column=1, padx=(px(10), 0), sticky="ns")
+        return s
+
+    def _sloupec_vystup(self, rodic):
+        b, f, px = BARVY, self.F, self.px
+        s = self._sloupec(rodic, T("stitek_vystup"))
+        pole = self._pole(s, T("lab_nazev_souboru"), vnitrni_okraj=False)
+        nazev = ttk.Entry(pole, textvariable=self.var_vystup_nazev, width=1)
+        nazev.grid(row=0, column=0, sticky="ew")
+        self._zamknout(nazev)
+        radek = self._radek_pod(s)
+        self.lbl_vystup_cesta = ZkracenyPopisek(radek, f["popis"], bg=b["panel"], fg=b["tlumeny"])
+        self.lbl_vystup_cesta.grid(row=0, column=0, sticky="ew")
+        self.odkaz_vystup = self._odkaz(radek, T("btn_zmenit"), self.vyber_vystup, font=f["popis"])
+        self.odkaz_vystup.grid(row=0, column=1, padx=(px(10), 0))
+
+        radek = self._radek_pod(s, pady=14)
+        radek.columnconfigure(0, weight=0)
+        self.seg_wav = tk.Label(radek, text="WAV", font=f["maly"], padx=px(15), pady=px(8), cursor="hand2")
+        self.seg_mp3 = tk.Label(radek, text="MP3", font=f["pole_t"], padx=px(15), pady=px(8), cursor="hand2")
+        self.seg_wav.grid(row=0, column=0)
+        self.seg_mp3.grid(row=0, column=1)
+        self.seg_wav.bind("<Button-1>", lambda _u: not self.bezi and self.var_format.set("WAV"))
+        self.seg_mp3.bind("<Button-1>", lambda _u: not self.bezi and self.var_format.set("MP3"))
+        self.cb_bitrate = ttk.Combobox(radek, textvariable=self.var_bitrate, width=5, state="readonly",
+                                       values=["96k", "128k", "160k", "192k"])
+        self.cb_bitrate.grid(row=0, column=2, padx=(px(10), 0))
+        self._zamknout(self.cb_bitrate)
+        self.lbl_velikost = tk.Label(radek, font=f["popis"], bg=b["panel"], fg=b["tlumeny"])
+        self.lbl_velikost.grid(row=0, column=3, padx=(px(10), 0))
+
+        self.ramec_chipu = tk.Frame(s, bg=b["panel"], height=px(30))
+        self.ramec_chipu.grid(row=s.radek, column=0, sticky="ew", pady=(px(14), 0))
+        s.radek += 1
+        self.chipy = [Chip(self.ramec_chipu, T("chip_obalka"), self.var_obalka, font=f["maly"]),
+                      Chip(self.ramec_chipu, T("chip_lupance"), self.var_lupance, font=f["maly"]),
+                      Chip(self.ramec_chipu, T("chip_orez"), self.var_orez, font=f["maly"]),
+                      Chip(self.ramec_chipu, T("chip_rd"), self.var_rychly_dekoder, font=f["maly"]),
+                      Chip(self.ramec_chipu, T("chip_pokrocile"), command=self.otevri_pokrocile,
+                           font=f["maly"])]
+        self.ramec_chipu.bind("<Configure>", lambda _u: self._preskladej_chipy())
+        return s
+
+    def _preskladej_chipy(self):
+        """Tk nezná zalamování jako flex-wrap, chipy se proto rozmisťují ručně."""
+        ramec = self.ramec_chipu
+        sirka, mezera = max(ramec.winfo_width(), 1), self.px(8)
+        x = y = vyska_radku = 0
+        for chip in self.chipy:
+            w, h = chip.winfo_reqwidth(), chip.winfo_reqheight()
+            if x and x + w > sirka:
+                x, y, vyska_radku = 0, y + vyska_radku + mezera, 0
+            chip.place(x=x, y=y)
+            x += w + mezera
+            vyska_radku = max(vyska_radku, h)
+        if int(ramec.cget("height")) != y + vyska_radku:
+            ramec.configure(height=y + vyska_radku)
+
+    # ---------------- Úvodní obrazovka ----------------
+    def _vytvor_start(self, rodic):
+        b, f, px = BARVY, self.F, self.px
+        karta = tk.Frame(rodic, bg=b["panel"], padx=px(20), pady=px(18))
+        karta.grid(row=0, column=0, sticky="ew")
+        karta.columnconfigure(0, weight=1)
+        self.karta_pripraveno = karta
+        self.lbl_pripraveno = tk.Label(karta, font=f["nadpis"], bg=b["panel"], fg=b["text"], anchor="w")
+        self.lbl_pripraveno.grid(row=0, column=0, sticky="w")
+        self.lbl_pripraveno_info = tk.Label(karta, font=f["popis"], bg=b["panel"], fg=b["tlumeny"],
+                                            anchor="w", justify="left")
+        self.lbl_pripraveno_info.grid(row=1, column=0, sticky="w", pady=(px(5), 0))
+        self.lbl_pripraveno_info.bind("<Configure>", lambda e: self.lbl_pripraveno_info.configure(
+            wraplength=max(px(200), e.width)))
+        self._odkaz(karta, T("btn_oprava_hotove"), self.oprav_usek, font=f["popis"]).grid(
+            row=2, column=0, sticky="w", pady=(px(10), 0))
+        self.tlacitka_start = tk.Frame(karta, bg=b["panel"])
+        self.btn_jina_kniha = Tlacitko(self.tlacitka_start, T("btn_nacist_jinou"), self.vyber_vstup,
+                                       font=f["pole"], padx=px(18), pady=px(11))
+        self.btn_jina_kniha.pack(side="left")
+        self.btn_start = Tlacitko(self.tlacitka_start, T("btn_start"), self.spust_prevod, druh="plocha",
+                                  font=f["tlacitko_t"], padx=px(16), pady=px(11))
+        self.btn_start.pack(side="left", padx=(px(9), 0))
+
+        self.karta_rozdelane = tk.Frame(rodic, bg=b["panel"])
+        self.karta_rozdelane.columnconfigure(0, weight=1)
+
+    def _odlozene_rozdelane(self):
+        if getattr(self, "_rozdelane_po", None):
+            self.after_cancel(self._rozdelane_po)
+        self._rozdelane_po = self.after(600, self._obnov_rozdelane)
+
+    def _obnov_rozdelane(self):
+        """Seznam přerušených převodů na úvodní obrazovce."""
+        self._rozdelane_po = None
+        if not self._gui_hotove:
+            return
+        b, f, px = BARVY, self.F, self.px
+        karta = self.karta_rozdelane
+        for dite in karta.winfo_children():
+            dite.destroy()
+        slozky = [Path(self.var_vystup_slozka.get().strip('" ') or (APP_DIR / "vystup")), APP_DIR / "vystup"]
+        zaznamy = najdi_rozdelane(slozky)
+        if not zaznamy:
+            karta.grid_remove()
+            return
+        karta.grid(row=1, column=0, sticky="ew", pady=(px(16), 0))
+        tk.Label(karta, text=T("stitek_rozdelane"), font=f["stitek"], bg=b["panel"], fg=b["tlumeny"],
+                 padx=px(16), pady=px(12), anchor="w").grid(row=0, column=0, sticky="w")
+        for i, z in enumerate(zaznamy[:8], start=1):
+            tk.Frame(karta, height=1, bg=b["linka"]).grid(row=2 * i - 1, column=0, sticky="ew")
+            radek = tk.Frame(karta, bg=b["panel"], padx=px(18), pady=px(12), cursor="hand2")
+            radek.grid(row=2 * i, column=0, sticky="ew")
+            radek.columnconfigure(0, weight=1)
+            nazev = ZkracenyPopisek(radek, f["pole"], bg=b["panel"], fg=b["text"])
+            nazev.nastav(z["nazev"])
+            nazev.grid(row=0, column=0, sticky="ew")
+            zdroj_chybi = bool(z.get("zdroj")) and not Path(z["zdroj"]).exists()
+            popis = T("rozdelane_popis", z["hotovo"], z["celkem"], kdy_text(z["kdy"]))
+            popis += T("rozdelane_zdroj_chybi") if zdroj_chybi else ""
+            tk.Label(radek, text=popis, font=f["maly"], bg=b["panel"], fg=b["tlumeny"], anchor="w").grid(
+                row=1, column=0, sticky="w", pady=(px(3), 0))
+            pruh = tk.Canvas(radek, width=px(120), height=px(5), bg=b["stopa"], highlightthickness=0, bd=0)
+            pruh.grid(row=0, column=1, rowspan=2, padx=px(16))
+            pruh.create_rectangle(0, 0, px(120) * z["procenta"] / 100.0, px(5), fill=b["plocha"], outline="")
+            akce = lambda _u=None, z=z: self.pokracuj_v_rozdelanem(z)
+            self._odkaz(radek, T("btn_pokracovat_kratce"), akce).grid(row=0, column=2, rowspan=2)
+            for w in (radek, nazev):
+                w.bind("<Button-1>", akce)
+
+    # ---------------- Karta stavu převodu ----------------
+    def _vytvor_stav(self, rodic):
+        b, f, px = BARVY, self.F, self.px
+        karta = tk.Frame(rodic, bg=b["panel"], padx=px(20), pady=px(18))
+        karta.grid(row=0, column=0, sticky="ew")
+        karta.columnconfigure(0, weight=1)
+
+        horni = tk.Frame(karta, bg=b["panel"])
+        horni.grid(row=0, column=0, sticky="ew")
+        horni.columnconfigure(1, weight=1)
+        self.platno_obalka = tk.Canvas(horni, width=px(76), height=px(76), bg=b["pole"],
+                                       highlightthickness=0, bd=0)
+        self.platno_obalka.grid(row=0, column=0, sticky="nw", padx=(0, px(18)))
+        stred = tk.Frame(horni, bg=b["panel"])
+        stred.grid(row=0, column=1, sticky="new")
+        odznak = tk.Frame(stred, bg=b["panel"])
+        odznak.pack(anchor="w")
+        self.lbl_odznak = tk.Label(odznak, font=f["odznak"], padx=px(10), pady=px(4))
+        self.lbl_odznak.pack(side="left")
+        self.lbl_stav_popis = tk.Label(odznak, font=f["popis"], bg=b["panel"], fg=b["tlumeny"])
+        self.lbl_stav_popis.pack(side="left", padx=(px(10), 0))
+        self.lbl_titul = tk.Label(stred, font=f["titul"], bg=b["panel"], fg=b["text"], anchor="w",
+                                  justify="left")
+        self.lbl_titul.pack(anchor="w", fill="x", pady=(px(9), 0))
+        self.lbl_autor = tk.Label(stred, font=f["popis"], bg=b["panel"], fg=b["tlumeny"], anchor="w")
+        self.lbl_autor.pack(anchor="w", pady=(px(4), 0))
+        stred.bind("<Configure>", lambda e: self.lbl_titul.configure(wraplength=max(px(120), e.width)))
+
+        self.tlacitka_stavu = tk.Frame(horni, bg=b["panel"])
+        self.tlacitka_stavu.grid(row=0, column=2, sticky="ne")
+        self.btn_pauza = Tlacitko(self.tlacitka_stavu, T("btn_pauza"), self.prepni_pauzu, font=f["pole_t"],
+                                  padx=px(17), pady=px(10))
+        self.btn_stop = Tlacitko(self.tlacitka_stavu, T("btn_zastavit"), self.zastav, font=f["pole_t"],
+                                 padx=px(17), pady=px(10))
+        self.btn_otevrit = Tlacitko(self.tlacitka_stavu, T("btn_otevrit"), self.otevri_vystup,
+                                    font=f["pole_t"], padx=px(17), pady=px(10))
+        self.btn_novy = Tlacitko(self.tlacitka_stavu, T("btn_novy_prevod"), self.novy_prevod,
+                                 font=f["pole_t"], padx=px(17), pady=px(10))
+
+        radek = tk.Frame(karta, bg=b["panel"])
+        radek.grid(row=1, column=0, sticky="ew", pady=(px(22), px(9)))
+        radek.columnconfigure(1, weight=1)
+        self.lbl_generuje = tk.Label(radek, font=f["nadpis"], bg=b["panel"], fg=b["text"])
+        self.lbl_generuje.grid(row=0, column=0, sticky="sw")
+        self.lbl_kap_nazev = ZkracenyPopisek(radek, f["maly"], bg=b["panel"], fg=b["text2"])
+        self.lbl_kap_nazev.grid(row=0, column=1, sticky="sew", padx=px(10))
+        self.lbl_procenta = tk.Label(radek, font=f["cislo"], bg=b["panel"], fg=b["text"])
+        self.lbl_procenta.grid(row=0, column=2, sticky="se")
+        self.platno_postup = tk.Canvas(karta, height=px(9), bg=b["stopa"], highlightthickness=0, bd=0)
+        self.platno_postup.grid(row=2, column=0, sticky="ew")
+        self.platno_postup.bind("<Configure>", lambda _u: self._kresli_postup())
+        casy = tk.Frame(karta, bg=b["panel"])
+        casy.grid(row=3, column=0, sticky="ew", pady=(px(9), 0))
+        casy.columnconfigure(0, weight=1)
+        self.lbl_hotovo = tk.Label(casy, font=f["popis"], bg=b["panel"], fg=b["tlumeny"])
+        self.lbl_hotovo.grid(row=0, column=0, sticky="w")
+        self.lbl_zbyva = tk.Label(casy, font=f["popis"], bg=b["panel"], fg=b["tlumeny"])
+        self.lbl_zbyva.grid(row=0, column=1, sticky="e")
+
+        self.ramec_mapa = tk.Frame(karta, bg=b["panel"])
+        self.ramec_mapa.grid(row=4, column=0, sticky="ew", pady=(px(20), 0))
+        self.ramec_mapa.columnconfigure(0, weight=1)
+        self.lbl_mapa = tk.Label(self.ramec_mapa, font=f["popis"], bg=b["panel"], fg=b["tlumeny"])
+        self.lbl_mapa.grid(row=0, column=0, sticky="e", pady=(0, px(8)))
+        self.platno_mapa = tk.Canvas(self.ramec_mapa, height=px(26), bg=b["panel"], highlightthickness=0, bd=0)
+        self.platno_mapa.grid(row=1, column=0, sticky="ew")
+        self.platno_mapa.bind("<Configure>", lambda _u: self._kresli_mapu())
+        self.platno_mapa.bind("<Button-1>", self._klik_mapa)
+
+    # ---------------- Přehrávač ----------------
+    def _vytvor_prehravac(self, rodic):
+        b, f, px = BARVY, self.F, self.px
+        karta = tk.Frame(rodic, bg=b["panel"], padx=px(20), pady=px(15))
+        karta.grid(row=1, column=0, sticky="ew", pady=(self._mezera, 0))
+        karta.columnconfigure(0, weight=1)
+
+        horni = tk.Frame(karta, bg=b["panel"])
+        horni.grid(row=0, column=0, sticky="ew")
+        horni.columnconfigure(1, weight=1)
+        ovladani = tk.Frame(horni, bg=b["panel"])
+        ovladani.grid(row=0, column=0, sticky="w")
+        v = px(36)
+        p = self.prehravac
+        self.ik_predchozi = Ikona(ovladani, "predchozi", lambda: self.prehravac.dalsi(-1), velikost=v)
+        self.ik_zpet = Ikona(ovladani, "zpet", lambda: self.prehravac.posun(-15), velikost=v, font=f["stitek"])
+        self.ik_hrat = Ikona(ovladani, "hrat", lambda: self.prehravac.prepni(), velikost=px(42), kruh=True)
+        self.ik_vpred = Ikona(ovladani, "vpred", lambda: self.prehravac.posun(30), velikost=v, font=f["stitek"])
+        self.ik_dalsi = Ikona(ovladani, "dalsi", lambda: self.prehravac.dalsi(1), velikost=v)
+        for i, ikona in enumerate((self.ik_predchozi, self.ik_zpet, self.ik_hrat, self.ik_vpred, self.ik_dalsi)):
+            ikona.grid(row=0, column=i, padx=(0 if i == 0 else px(7), 0))
+        del p
+
+        prave = tk.Frame(horni, bg=b["panel"])
+        prave.grid(row=0, column=2, sticky="e")
+        self.btn_opravit_misto = Tlacitko(prave, T("btn_opravit_misto"), self.oprav_hrane_misto,
+                                          font=f["pole"], padx=px(11), pady=px(7))
+        self.btn_opravit_misto.grid(row=0, column=0)
+        self.btn_zive = Tlacitko(prave, T("btn_zive"), lambda: self.prehravac.na_zive(),
+                                 font=f["pole"], padx=px(11), pady=px(7))
+        self.btn_zive.grid(row=0, column=1, padx=(px(9), 0))
+        self.ramec_ovladani = horni
+
+        self.platno_vlna = tk.Canvas(karta, height=px(42), bg=b["panel"], highlightthickness=0, bd=0,
+                                     cursor="hand2")
+        self.platno_vlna.grid(row=1, column=0, sticky="ew", pady=(px(14), 0))
+        self.platno_vlna.bind("<Button-1>", self._klik_vlna)
+        self.platno_vlna.bind("<B1-Motion>", self._klik_vlna)
+        popisky = tk.Frame(karta, bg=b["panel"])
+        popisky.grid(row=2, column=0, sticky="ew", pady=(px(2), 0))
+        popisky.columnconfigure(1, weight=1)
+        self.lbl_pozice = tk.Label(popisky, font=f["maly"], bg=b["panel"], fg=b["tlumeny"])
+        self.lbl_pozice.grid(row=0, column=0, sticky="w")
+        self.lbl_vlna_info = ZkracenyPopisek(popisky, f["maly"], bg=b["panel"], fg=b["text2"], anchor="center")
+        self.lbl_vlna_info.grid(row=0, column=1, sticky="ew", padx=px(14))
+        self.lbl_delka = tk.Label(popisky, font=f["maly"], bg=b["panel"], fg=b["tlumeny"])
+        self.lbl_delka.grid(row=0, column=2, sticky="e")
+
+    # ---------------- Podrobný průběh ----------------
+    def _vytvor_log(self, rodic):
+        b, f, px = BARVY, self.F, self.px
+        karta = tk.Frame(rodic, bg=b["panel"])
+        karta.columnconfigure(0, weight=1)
+        hlava = tk.Frame(karta, bg=b["panel"], padx=px(20), pady=px(12), cursor="hand2")
+        hlava.grid(row=0, column=0, sticky="ew")
+        hlava.columnconfigure(1, weight=1)
+        stitek = tk.Label(hlava, text=T("stitek_log"), font=f["stitek"], bg=b["panel"], fg=b["tlumeny"])
+        stitek.grid(row=0, column=0, sticky="w")
+        self.lbl_log_souhrn = tk.Label(hlava, font=f["popis"], bg=b["panel"], fg=b["tlumeny"])
+        self.lbl_log_souhrn.grid(row=0, column=1, sticky="w", padx=(px(10), 0))
+        self.lbl_log_prepinac = tk.Label(hlava, font=f["pole"], bg=b["panel"], fg=b["akcent"])
+        self.lbl_log_prepinac.grid(row=0, column=2, sticky="e")
+        for w in (hlava, stitek, self.lbl_log_souhrn, self.lbl_log_prepinac):
+            w.bind("<Button-1>", lambda _u: self._prepni_log())
+
+        self.telo_log = tk.Frame(karta, bg=b["panel"], padx=px(20))
+        self.telo_log.columnconfigure(0, weight=1)
+        self.log_box = tk.Text(self.telo_log, height=12, wrap="word", state="disabled", font=f["log"],
+                               bg=b["pole"], fg=b["tlumeny"], insertbackground=b["text"],
+                               selectbackground=b["tlacitko_aktivni"], selectforeground=b["text"],
+                               relief="flat", borderwidth=0, highlightthickness=0,
+                               padx=px(14), pady=px(12), spacing1=px(2), spacing3=px(2))
+        self.log_box.grid(row=0, column=0, sticky="ew")
+        posuv = ttk.Scrollbar(self.telo_log, orient="vertical", command=self.log_box.yview,
+                              style="TenkyPanel.Vertical.TScrollbar")
         posuv.grid(row=0, column=1, sticky="ns")
         self.log_box.configure(yscrollcommand=posuv.set)
+        self.log_box.tag_configure("cas", foreground=b["cas_logu"])
+        self.log_box.tag_configure("bezny", foreground=b["tlumeny"])
+        self.log_box.tag_configure("chyba", foreground=b["chyba"])
+        self.log_box.tag_configure("varovani", foreground=b["varovani"])
+        self.log_box.tag_configure("uspech", foreground=b["uspech"])
+        self.log_otevreny = not bool(self.sbalene_sekce.get("log", True))
+        self._vykresli_log_prepinac()
+        return karta
 
-        self.log_box.tag_configure("cas", foreground="#3d3d47")
-        self.log_box.tag_configure("bezny", foreground=BARVY["tlumeny"])
-        self.log_box.tag_configure("chyba", foreground=BARVY["chyba"])
-        self.log_box.tag_configure("varovani", foreground=BARVY["varovani"])
-        self.log_box.tag_configure("uspech", foreground=BARVY["uspech"])
+    # ---------------- Seznam kapitol ----------------
+    def _vytvor_kapitoly(self, rodic):
+        b, f, px = BARVY, self.F, self.px
+        karta = tk.Frame(rodic, bg=b["panel"])
+        karta.grid(row=0, column=0, sticky="new")
+        karta.columnconfigure(0, weight=1)
+        hlava = tk.Frame(karta, bg=b["panel"], padx=px(16), pady=px(12))
+        hlava.grid(row=0, column=0, sticky="ew")
+        hlava.columnconfigure(0, weight=1)
+        tk.Label(hlava, text=T("stitek_kapitoly"), font=f["stitek"], bg=b["panel"], fg=b["tlumeny"]).grid(
+            row=0, column=0, sticky="w")
+        pilulky = tk.Frame(hlava, bg=b["panel"])
+        pilulky.grid(row=0, column=1, sticky="e")
+        self.pil_vse = tk.Label(pilulky, text=T("filtr_kap_vse"), font=f["maly"], padx=px(11), pady=px(5),
+                                cursor="hand2")
+        self.pil_poslech = tk.Label(pilulky, text=T("filtr_kap_poslech"), font=f["maly"], padx=px(11),
+                                    pady=px(5), cursor="hand2")
+        self.pil_vse.grid(row=0, column=0)
+        self.pil_poslech.grid(row=0, column=1, padx=(px(6), 0))
+        self.pil_vse.bind("<Button-1>", lambda _u: self._nastav_filtr("vse"))
+        self.pil_poslech.bind("<Button-1>", lambda _u: self._nastav_filtr("poslech"))
+        tk.Frame(karta, height=1, bg=b["linka"]).grid(row=1, column=0, sticky="ew")
+        telo = tk.Frame(karta, bg=b["panel"])
+        telo.grid(row=2, column=0, sticky="ew")
+        telo.columnconfigure(0, weight=1)
+        self.platno_kap = tk.Canvas(telo, bg=b["panel"], highlightthickness=0, bd=0, height=px(44),
+                                    yscrollincrement=px(22))
+        self.platno_kap.grid(row=0, column=0, sticky="ew")
+        self.posuv_kap = ttk.Scrollbar(telo, orient="vertical", command=self.platno_kap.yview,
+                                       style="TenkyPanel.Vertical.TScrollbar")
+        self.posuv_kap.grid(row=0, column=1, sticky="ns")
+        self.platno_kap.configure(yscrollcommand=self.posuv_kap.set)
+        self.platno_kap.bind("<Configure>", lambda _u: self._kresli_kapitoly())
+        self.platno_kap.bind("<Button-1>", self._klik_kapitola)
+        self.karta_kapitoly = karta
+        self._obarvi_filtr()
 
     # ------------------------------------------------------------------
-    def _zamknout(self, *widgety):
-        """Zapamatuje si widget i jeho normální stav, ať ho jde za běhu vypnout."""
-        for w in widgety:
-            try:
-                normalni = "readonly" if str(w.cget("state")) == "readonly" else "normal"
-            except tk.TclError:
-                normalni = "normal"
-            self.zamykatelne.append((w, normalni))
-
-    def _zamkni_ovladani(self, zamknout: bool):
-        for w, normalni in self.zamykatelne:
-            try:
-                w.configure(state="disabled" if zamknout else normalni)
-            except tk.TclError:
-                pass
-
+    #  Rozvržení podle šířky okna
     # ------------------------------------------------------------------
-    def _sekce(self, rodic, nadpis: str) -> ttk.Frame:
-        """Nadpis sekce + tenká linka + prostor na obsah. Žádné rámečky."""
-        obal = ttk.Frame(rodic)
-        obal.pack(fill="x", pady=(0, 20))
-        obal.columnconfigure(0, weight=1)
+    def _pri_zmene_velikosti(self, udalost=None):
+        sirka = udalost.width if udalost is not None else self.platno.winfo_width()
+        self.platno.itemconfigure(self._okno_obsahu, width=sirka)
+        self._rozloz(sirka)
 
-        zahlavi = ttk.Frame(obal)
-        zahlavi.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        zahlavi.columnconfigure(1, weight=1)
-        ttk.Label(zahlavi, text=nadpis, style="Titulek.TLabel").grid(row=0, column=0, sticky="w")
-        tk.Frame(zahlavi, height=1, background=BARVY["linka"]).grid(
-            row=0, column=1, sticky="ew", padx=(12, 0), pady=(6, 0))
+    def _rozloz(self, sirka_okna: int):
+        px = self.px
+        sirka = sirka_okna - 2 * self._okraj
+        sloupcu = 3 if sirka >= px(876) else (2 if sirka >= px(578) else 1)
+        seznam = len(self.kapitoly) > 1
+        dva = seznam and sirka >= px(918)
+        uzky = sirka < px(620)
+        klic = (sloupcu, dva, seznam, uzky, self.stav_prevodu, self.nastaveni_otevrene)
+        if klic == self._rozlozeni:
+            return
+        self._rozlozeni = klic
 
-        obsah = ttk.Frame(obal)
-        obsah.grid(row=1, column=0, sticky="ew")
-        obsah.columnconfigure(0, weight=1)
-        return obsah
+        telo = self.telo_nastaveni
+        for i in range(3):
+            telo.columnconfigure(i, weight=1 if i < sloupcu else 0, uniform="nastaveni" if i < sloupcu else "")
+        for i, sloupec in enumerate(self.sloupce_nastaveni):
+            radek, sl = divmod(i, sloupcu)
+            sloupec.grid(row=radek, column=sl, sticky="new",
+                         padx=(0 if sl == 0 else px(18), 0), pady=(0 if radek == 0 else px(22), 0))
 
-    def _sekce_sbalitelna(self, rodic, nadpis: str, sbaleno: bool = True,
-                          roztahnout: bool = False, mezera_nahore: int = 0,
-                          klic: str = "") -> ttk.Frame:
-        """Sekce, kterou lze kliknutím na nadpis sbalit. Drží pokročilá nastavení z cesty.
+        if uzky:
+            self.tlacitka_start.grid(row=3, column=0, rowspan=1, sticky="w", padx=0, pady=(px(14), 0))
+            self.tlacitka_stavu.grid(row=1, column=1, columnspan=2, sticky="w", pady=(px(12), 0))
+        else:
+            self.tlacitka_start.grid(row=0, column=1, rowspan=3, sticky="e", padx=(px(18), 0), pady=0)
+            self.tlacitka_stavu.grid(row=0, column=2, columnspan=1, sticky="ne", pady=0)
 
-        Se zadaným 'klic' si stav pamatuje v konfiguraci - kdo si okno jednou
-        zkrátí, nemusí to dělat po každém spuštění znovu.
-        """
-        obal = ttk.Frame(rodic)
-        obal.pack(fill="both" if roztahnout else "x",
-                  expand=roztahnout, pady=(mezera_nahore, 20))
-        obal.columnconfigure(0, weight=1)
-        if roztahnout:
-            obal.rowconfigure(1, weight=1)
-
-        zahlavi = ttk.Frame(obal)
-        zahlavi.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        zahlavi.columnconfigure(1, weight=1)
-
-        znacka = ttk.Label(zahlavi, text="", style="Titulek.TLabel")
-        znacka.grid(row=0, column=0, sticky="w")
-        linka = tk.Frame(zahlavi, height=1, background=BARVY["linka"])
-        linka.grid(row=0, column=1, sticky="ew", padx=(12, 0), pady=(6, 0))
-
-        obsah = ttk.Frame(obal)
-        obsah.columnconfigure(0, weight=1)
-
-        stav = {"sbaleno": bool(self.sbalene_sekce.get(klic, sbaleno)) if klic else sbaleno}
-
-        def vykresli():
-            sipka = "+" if stav["sbaleno"] else "−"
-            znacka.configure(text=f"{nadpis}  {sipka}")
-            if stav["sbaleno"]:
-                obsah.grid_forget()
+        oblast = self.oblast_prevod
+        if dva:
+            oblast.columnconfigure(0, weight=3, minsize=px(420))
+            oblast.columnconfigure(1, weight=2, minsize=px(300))
+            self.levy.grid(row=0, column=0, sticky="new", pady=0)
+            self.pravy.grid(row=0, column=1, sticky="new", padx=(px(18), 0), pady=0)
+        else:
+            oblast.columnconfigure(0, weight=1, minsize=0)
+            oblast.columnconfigure(1, weight=0, minsize=0)
+            self.levy.grid(row=0, column=0, sticky="new", pady=0)
+            if seznam:
+                self.pravy.grid(row=1, column=0, sticky="new", padx=0, pady=(self._mezera, 0))
             else:
-                obsah.grid(row=1, column=0, sticky="nsew" if roztahnout else "ew")
+                self.pravy.grid_remove()
+        # Tlačítka vedle ovládání přehrávače se na úzkém okně přesunou pod něj
+        prave = self.btn_zive.master
+        if uzky:
+            prave.grid(row=1, column=0, columnspan=3, sticky="w", pady=(px(10), 0))
+        else:
+            prave.grid(row=0, column=2, columnspan=1, sticky="e", pady=0)
 
-        def prepni(_udalost=None):
-            stav["sbaleno"] = not stav["sbaleno"]
-            vykresli()
-            if klic:
-                self.sbalene_sekce[klic] = stav["sbaleno"]
+    def _prepni_zobrazeni(self):
+        """Co okno ukáže: úvodní obrazovku, nebo převod s přehrávačem."""
+        px = self.px
+        start = self.stav_prevodu == "nezahajeno"
+        if start:
+            self.oblast_prevod.grid_remove()
+            self.oblast_start.grid(row=1, column=0, sticky="ew", padx=self._okraj, pady=(px(16), 0))
+            self.karta_log.grid(in_=self.obsah, row=2, column=0, sticky="ew", padx=self._okraj,
+                                pady=(px(16), px(22)))
+            self.radek_souhrn.grid_remove()
+            self.telo_nastaveni.grid(row=1, column=0, sticky="ew")
+        else:
+            self.oblast_start.grid_remove()
+            self.oblast_prevod.grid(row=1, column=0, sticky="ew", padx=self._okraj, pady=(px(14), px(22)))
+            self.karta_log.grid(in_=self.levy, row=2, column=0, sticky="ew", padx=0,
+                                pady=(self._mezera, 0))
+            self.radek_souhrn.grid(row=0, column=0, sticky="ew")
+            if self.nastaveni_otevrene:
+                self.telo_nastaveni.grid(row=1, column=0, sticky="ew")
+            else:
+                self.telo_nastaveni.grid_remove()
+        self.lbl_upravit.configure(text=T("odkaz_sbalit") if self.nastaveni_otevrene else T("odkaz_upravit"))
+        self._rozlozeni = None
+        self._rozloz(max(self.platno.winfo_width(), self.px(1000)) if not self.platno.winfo_ismapped()
+                     else self.platno.winfo_width())
 
-        for w in (znacka, linka, zahlavi):
-            w.bind("<Button-1>", prepni)
-            w.configure(cursor="hand2")
-        vykresli()
-        return obsah
+    def _prepni_nastaveni(self):
+        if self.stav_prevodu == "nezahajeno":
+            return
+        self.nastaveni_otevrene = not self.nastaveni_otevrene
+        self._prepni_zobrazeni()
+
+    def _prepni_log(self):
+        self.log_otevreny = not self.log_otevreny
+        self.sbalene_sekce["log"] = not self.log_otevreny
+        self._vykresli_log_prepinac()
+
+    def _vykresli_log_prepinac(self):
+        if self.log_otevreny:
+            self.telo_log.grid(row=1, column=0, sticky="ew", pady=(0, self.px(15)))
+            self.log_box.see("end")
+        else:
+            self.telo_log.grid_remove()
+        self.lbl_log_prepinac.configure(text=T("odkaz_skryt") if self.log_otevreny else T("odkaz_zobrazit"))
+
+    def _kolecko(self, udalost):
+        """Kolečko posouvá seznam kapitol, když je nad ním, jinak celé okno."""
+        if not self._gui_hotove:
+            return
+        widget = self.winfo_containing(udalost.x_root, udalost.y_root)
+        if widget is None or widget.winfo_toplevel() is not self:
+            return
+        if isinstance(widget, (tk.Text, tk.Listbox)):
+            return                      # log se posouvá sám
+        if getattr(udalost, "num", 0) == 4 or getattr(udalost, "delta", 0) > 0:
+            krok = -1
+        else:
+            krok = 1
+        cil = self.platno
+        if widget is self.platno_kap and self.posuv_kap.winfo_ismapped():
+            cil = self.platno_kap
+        if cil.yview() != (0.0, 1.0):
+            cil.yview_scroll(krok * 3, "units")
 
     # ------------------------------------------------------------------
+    #  Vzhled
     # ------------------------------------------------------------------
     def _nastav_pojmenovane_fonty(self):
         """Přepíše pojmenované fonty Tk.
@@ -3693,296 +4433,279 @@ class Aplikace(tk.Tk):
             except tk.TclError:
                 pass
 
-    # ------------------------------------------------------------------
     def _nastav_styl(self):
-        """Tmavé ladění ttk. Základem je 'clam' - jediné téma, které se dá plně přebarvit."""
+        """ttk podle schématu. Základem je 'clam' - jediné téma, které se dá plně přebarvit."""
         s = ttk.Style(self)
         try:
             s.theme_use("clam")
         except tk.TclError:
             pass
 
-        poz, panel, svetlejsi = BARVY["pozadi"], BARVY["panel"], BARVY["panel_svetlejsi"]
-        text, tlumeny, akcent, linka = (BARVY["text"], BARVY["tlumeny"],
-                                        BARVY["akcent"], BARVY["linka"])
+        b, px = BARVY, self.px
+        poz, panel, pole = b["pozadi"], b["panel"], b["pole"]
+        text, tlumeny, akcent, linka = b["text"], b["tlumeny"], b["akcent"], b["linka"]
 
-        # clam kresli 3D okraje pres bordercolor/lightcolor/darkcolor. Dokud
-        # nejsou srovnane s pozadim, svitI kolem kazdeho pole svetly ramecek.
-        s.configure(".", background=poz, foreground=text, font=self.F_BEZNY,
+        # clam kreslí 3D okraje přes bordercolor/lightcolor/darkcolor. Dokud
+        # nejsou srovnané s pozadím, svítí kolem každého pole světlý rámeček.
+        s.configure(".", background=poz, foreground=text, font=self.F["pole"],
                     borderwidth=0, focuscolor=poz, relief="flat",
-                    bordercolor=poz, lightcolor=poz, darkcolor=poz,
-                    troughcolor=panel)
+                    bordercolor=poz, lightcolor=poz, darkcolor=poz, troughcolor=pole)
         s.configure("TFrame", background=poz)
-        s.configure("TLabel", background=poz, foreground=text, font=self.F_BEZNY)
-        s.configure("Titulek.TLabel", foreground=tlumeny, font=self.F_TITULEK)
-        s.configure("Tlumeny.TLabel", foreground=tlumeny, font=self.F_MALY)
-        s.configure("Hodnota.TLabel", foreground=akcent, font=self.F_MALY)
-        s.configure("Nadpis.TLabel", foreground=text, font=(self.font_rodina, 13, "bold"))
+        s.configure("TLabel", background=poz, foreground=text, font=self.F["pole"])
+        s.configure("Tlumeny.TLabel", foreground=tlumeny, font=self.F["popis"])
+        s.configure("Hodnota.TLabel", foreground=akcent, font=self.F["popis"])
 
-        # Tlačítka - plochá, bez rámečků, o odstín světlejší než pole
-        s.configure("Tichy.TButton", background=BARVY["tlacitko"], foreground=text,
-                    borderwidth=0, relief="flat", padding=(14, 7), font=self.F_BEZNY)
+        # Tlačítka dialogu opravy úseku
+        s.configure("Tichy.TButton", background=b["tlacitko"], foreground=text,
+                    borderwidth=0, relief="flat", padding=(px(14), px(7)), font=self.F["pole"])
         s.map("Tichy.TButton",
-              background=[("pressed", linka), ("active", BARVY["tlacitko_aktivni"]),
-                          ("disabled", poz)],
-              foreground=[("disabled", linka)])
-
-        s.configure("Akce.TButton", background=akcent, foreground=poz,
-                    borderwidth=0, relief="flat", padding=(18, 7),
-                    font=(self.font_rodina, 10, "bold"))
+              background=[("pressed", linka), ("active", b["tlacitko_aktivni"]), ("disabled", poz)],
+              foreground=[("disabled", tlumeny)])
+        s.configure("Akce.TButton", background=b["plocha"], foreground=b["na_plose"],
+                    borderwidth=0, relief="flat", padding=(px(18), px(7)), font=self.F["tlacitko_t"])
         s.map("Akce.TButton",
-              background=[("pressed", "#5f86d8"), ("active", "#93b4ff"), ("disabled", panel)],
-              foreground=[("disabled", linka)])
+              background=[("pressed", b["plocha_aktivni"]), ("active", b["plocha_aktivni"]),
+                          ("disabled", b["stopa2"])],
+              foreground=[("disabled", b["na_plose"])])
 
-        # Vstupní pole
         for jmeno in ("TEntry", "TSpinbox", "TCombobox"):
-            s.configure(jmeno, fieldbackground=panel, background=panel,
-                        foreground=BARVY["text_pole"],
+            s.configure(jmeno, fieldbackground=pole, background=pole, foreground=text,
                         insertcolor=text, arrowcolor=tlumeny, borderwidth=0,
-                        relief="flat", padding=(10, 7), selectbackground=svetlejsi,
-                        selectforeground=text, arrowsize=9,
-                        bordercolor=panel, lightcolor=panel, darkcolor=panel,
-                        troughcolor=panel)
+                        relief="flat", padding=(px(11), px(8)), selectbackground=b["tlacitko_aktivni"],
+                        selectforeground=text, arrowsize=px(9),
+                        bordercolor=pole, lightcolor=pole, darkcolor=pole, troughcolor=pole)
             s.map(jmeno,
-                  fieldbackground=[("readonly", panel), ("disabled", poz)],
-                  foreground=[("disabled", linka)],
-                  bordercolor=[("focus", linka)],
-                  lightcolor=[("focus", linka)],
+                  fieldbackground=[("readonly", pole), ("disabled", pole)],
+                  foreground=[("disabled", tlumeny)],
+                  bordercolor=[("focus", pole)],
+                  lightcolor=[("focus", pole)],
                   arrowcolor=[("active", text)])
 
-        # Rozbalovací seznam comboboxu je klasický tk widget, styl na nej neplati
+        # Rozbalovací seznam comboboxu je klasický tk widget, styl na něj neplatí
         self.option_add("*TCombobox*Listbox.background", panel)
         self.option_add("*TCombobox*Listbox.foreground", text)
-        self.option_add("*TCombobox*Listbox.selectBackground", akcent)
-        self.option_add("*TCombobox*Listbox.selectForeground", poz)
+        self.option_add("*TCombobox*Listbox.selectBackground", b["plocha"])
+        self.option_add("*TCombobox*Listbox.selectForeground", b["na_plose"])
         self.option_add("*TCombobox*Listbox.borderWidth", 0)
-        self.option_add("*TCombobox*Listbox.font", self.F_BEZNY)
+        self.option_add("*TCombobox*Listbox.font", self.F["pole"])
 
-        # Přepínače. clam pro indikátor používá 'indicatorbackground' - ne
-        # 'indicatorcolor', ten se tiše ignoruje a políčko zůstane bílé.
-        for jmeno in ("TCheckbutton", "TRadiobutton"):
-            s.configure(jmeno, background=poz, foreground=text, font=self.F_BEZNY,
-                        indicatorbackground=panel, indicatorforeground=poz,
-                        indicatorsize=11, indicatormargin=(0, 0, 9, 0),
-                        upperbordercolor=linka, lowerbordercolor=linka,
-                        borderwidth=0, focusthickness=0)
-            s.map(jmeno,
-                  background=[("active", poz)],
-                  indicatorbackground=[("selected", akcent), ("active", svetlejsi),
-                                       ("!selected", panel)],
-                  upperbordercolor=[("selected", akcent), ("active", svetlejsi)],
-                  lowerbordercolor=[("selected", akcent), ("active", svetlejsi)],
-                  foreground=[("disabled", linka)])
+        s.configure("Horizontal.TScale", background=b["plocha"], troughcolor=pole,
+                    borderwidth=0, sliderthickness=px(14), sliderrelief="flat", gripcount=0,
+                    bordercolor=pole, lightcolor=b["plocha"], darkcolor=b["plocha"])
+        s.map("Horizontal.TScale", background=[("active", b["plocha_aktivni"]), ("disabled", b["stopa2"])])
 
-        # Posuvníky hodnot - gripcount=0 odstrani ryhovani na jezdci
-        s.configure("Horizontal.TScale", background=akcent, troughcolor=panel,
-                    borderwidth=0, sliderthickness=14, sliderrelief="flat", gripcount=0,
-                    bordercolor=panel, lightcolor=akcent, darkcolor=akcent)
-        s.map("Horizontal.TScale",
-              background=[("active", "#93b4ff"), ("disabled", linka)])
+        for jmeno, zlab in (("Tenky.Vertical.TScrollbar", poz), ("TenkyPanel.Vertical.TScrollbar", panel)):
+            s.configure(jmeno, background=b["stopa2"], troughcolor=zlab, bordercolor=zlab,
+                        arrowcolor=zlab, borderwidth=0, arrowsize=1, width=px(6))
+            s.map(jmeno, background=[("active", tlumeny)])
 
-        # Ukazatel průběhu - tenká linka, žádný 3D rám
-        s.configure("Tenky.Horizontal.TProgressbar", troughcolor=panel, background=akcent,
-                    borderwidth=0, thickness=3, lightcolor=akcent, darkcolor=akcent,
-                    bordercolor=panel)
+    def prepni_tema(self):
+        self.tema = nastav_paletu("svetle" if self.tema == "tmave" else "tmave")
+        self._uloz_config()
+        self._prestav_okno()
 
-        # Posuvník logu
-        s.configure("Tenky.Vertical.TScrollbar", background=panel, troughcolor=poz,
-                    bordercolor=poz, arrowcolor=poz, borderwidth=0, arrowsize=1, width=6)
-        s.map("Tenky.Vertical.TScrollbar", background=[("active", svetlejsi)])
-
-    def _aktualizuj_popisky_posuvniku(self):
-        for popisek, promenna in self.popisky_posuvniku.values():
-            popisek.config(text=f"{promenna.get():.2f}")
-
-    # ------------------------------------------------------------------
-    #  Log a fronta zpráv z pracovního vlákna
-    # ------------------------------------------------------------------
-    def log(self, zprava: str):
-        if zprava.startswith("CHYBA"):
-            znacka = "chyba"
-        elif zprava.startswith("VAROVÁNÍ"):
-            znacka = "varovani"
-        elif zprava.startswith(("HOTOVO", "Český fine-tune aplikován", "Spouštím přehrávání")):
-            znacka = "uspech"
-        else:
-            znacka = "bezny"
-
-        self.log_box.config(state="normal")
-        self.log_box.insert("end", time.strftime("%H:%M:%S  "), "cas")
-        self.log_box.insert("end", f"{zprava}\n", znacka)
-        self.log_box.see("end")
-        self.log_box.config(state="disabled")
-
-    def log_z_vlakna(self, zprava: str):
-        self.fronta.put(("log", zprava))
-
-    # ------------------------------------------------------------------
-    def prepni_poslech(self):
-        """Zapnutí/vypnutí poslechu i uprostřed běžícího převodu."""
-        chce = bool(self.var_poslouchat.get())
-
-        if not self.bezi:
-            return                       # projeví se při spuštění převodu
-
-        if chce and (self.prehravac is None or not self.prehravac.bezi):
-            self.prehravac = Prehravac(self.engine.sr, max(5, int(self.var_naskok.get())),
-                                       self.log_z_vlakna)
-            if self.prehravac.start():
-                self.log(T("log_poslech_zap"))
-            else:
-                self.prehravac = None
-                self.var_poslouchat.set(False)
-        elif not chce and self.prehravac is not None and self.prehravac.bezi:
-            self.prehravac.zastav()
-            self.log(T("log_poslech_off"))
-
-    # ------------------------------------------------------------------
     def zmen_jazyk(self):
-        """Přepne jazyk rozhraní a postaví okno znovu.
-
-        Widgety si texty drží v sobě, takže překreslit jednotlivě by znamenalo
-        držet odkaz na každý popisek. Postavit okno znovu je jednodušší i
-        spolehlivější - proměnné i běžící převod to přežijí.
-        """
+        """Přepne jazyk rozhraní a postaví okno znovu."""
         nazev = self.var_jazyk.get()
         kod = next((k for k, v in JAZYKY.items() if v == nazev), "en")
         if kod == aktualni_jazyk():
             return
-
-        stary_log = self.log_box.get("1.0", "end").rstrip("\n")
         nastav_jazyk(kod)
         self._uloz_config()
+        self._prestav_okno()
+        self.log(T("log_jazyk", JAZYKY[kod]))
 
+    def _prestav_okno(self):
+        """Widgety si texty i barvy drží v sobě. Postavit okno znovu je jednodušší
+        i spolehlivější než přebarvovat každý zvlášť - proměnné, přehrávač
+        i běžící převod to přežijí."""
+        for udalost in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.unbind_all(udalost)
         for potomek in self.winfo_children():
             potomek.destroy()
         self._vytvor_gui()
         self._obnov_z_configu()
         self.title(f"{T('app_nazev')} v{VERSION}")
-
-        # Texty, které nejsou svázané s widgetem, je nutné přeložit ručně
-        if not self.bezi:
-            self.var_stav.set(T("stav_pripraveno"))
-        if not self.bloky:
-            self.var_soubor_info.set(T("info_zadny"))
-
-        # Běžící převod musí po přestavbě zůstat v odpovídajícím stavu
         if self.bezi:
-            self.btn_start.config(state="disabled")
-            self.btn_navazat.config(state="disabled")
-            self.btn_test.config(state="disabled")
-            self.btn_pauza.config(state="normal")
-            self.btn_stop.config(state="normal")
             self._zamkni_ovladani(True)
 
-        if stary_log:
-            self.log_box.config(state="normal")
-            self.log_box.insert("end", stary_log + "\n", "bezny")
-            self.log_box.config(state="disabled")
-        self.log(T("log_jazyk", JAZYKY[kod]))
-        self.log_box.see("end")
-
     # ------------------------------------------------------------------
-    def prepni_pauzu_poslechu(self):
-        """Pauza a pokračování samotného přehrávání. Generování běží dál."""
-        p = self.prehravac
-        if p is None or not p.bezi:
-            return
-        pozastaveno = p.prepni_pauzu()
-        self.btn_poslech_pauza.config(
-            text=T("btn_poslech_hrat") if pozastaveno else T("btn_poslech_pauza"))
-        self.log(T("log_poslech_pauza") if pozastaveno else T("log_poslech_hraj"))
-
+    #  Zamykání a obsah nastavení
     # ------------------------------------------------------------------
-    def _aktualizuj_poslech(self):
-        """Ukazuje, kolik náskoku zbývá - to je jediné, co může poslech shodit."""
-        p = self.prehravac
-        bezici = p is not None and p.bezi
-        self.btn_poslech_pauza.config(state="normal" if bezici else "disabled")
-        if not bezici and self.btn_poslech_pauza.cget("text") != T("btn_poslech_pauza"):
-            self.btn_poslech_pauza.config(text=T("btn_poslech_pauza"))
+    def _zamknout(self, *widgety):
+        """Zapamatuje si widget i jeho normální stav, ať ho jde za běhu vypnout."""
+        for w in widgety:
+            try:
+                normalni = "readonly" if str(w.cget("state")) == "readonly" else "normal"
+            except tk.TclError:
+                normalni = "normal"
+            self.zamykatelne.append((w, normalni))
 
-        if bezici:
-            zasoba = p.zasoba_s
-            if p.pozastaveno:
-                self.var_poslech_info.set(T("poslech_pauza", formatuj_cas(zasoba),
-                                            formatuj_cas(p.prehrano_s)))
-            elif p.ceka_na_naskok:
-                self.var_poslech_info.set(T("poslech_naskok", formatuj_cas(zasoba),
-                                            formatuj_cas(p.naskok_s)))
+    def _zamkni_ovladani(self, zamknout: bool):
+        for w, normalni in self.zamykatelne:
+            try:
+                w.configure(state="disabled" if zamknout else normalni)
+            except tk.TclError:
+                pass
+        # Během převodu jsou pole jen ke čtení a volby výběru zmizí
+        for odkaz in (self.odkaz_kniha, self.odkaz_hlas, self.odkaz_vystup):
+            if zamknout:
+                odkaz.grid_remove()
             else:
-                # Při ~0,95x realtime se zásoba tenčí zhruba dvacetkrát pomaleji, než roste
-                vydrzi = zasoba * 20
-                self.var_poslech_info.set(T("poslech_hraje", formatuj_cas(zasoba),
-                                            formatuj_cas(p.prehrano_s), formatuj_cas(vydrzi)))
-        elif p is not None and not p.bezi and self.var_poslech_info.get():
-            self.var_poslech_info.set(T("poslech_konec"))
-        self.after(500, self._aktualizuj_poslech)
+                odkaz.grid()
+        for chip in self.chipy[:-1]:
+            chip.povol(not zamknout)
+        self.btn_test.povol(not zamknout)
+        self._po_zmene_nastaveni()
 
-    # ------------------------------------------------------------------
-    def _vykresli_hladinu(self):
-        """Sloupcová vizualizace hlasitosti právě přehrávaného zvuku."""
-        platno = self.platno_hladina
-        platno.delete("all")
-        sirka = max(platno.winfo_width(), 1)
-        vyska = max(platno.winfo_height(), 1)
+    def _po_zmene_nastaveni(self):
+        """Promítne proměnné do popisků, souhrnu a odhadů. Volá se ze stop proměnných."""
+        if not self._gui_hotove:
+            return
+        b = BARVY
+        kniha = self.var_vstup.get().strip('" ')
+        hlas = self.var_ref_wav.get().strip('" ')
+        slozka = self.var_vystup_slozka.get().strip('" ')
+        mp3 = self.var_format.get() == "MP3"
 
-        p = self.prehravac
-        hladiny = list(p.hladiny) if (p is not None and p.bezi) else []
-
-        if not hladiny:
-            platno.create_text(sirka // 2, vyska // 2,
-                               text=T("vizu_ticho") if p is None or not p.bezi else "…",
-                               fill=BARVY["linka"], font=(self.font_rodina, 9))
+        self.lbl_kniha.nastav(Path(kniha).name if kniha else T("zadna_kniha"))
+        self.lbl_kniha.configure(fg=b["text"] if kniha else b["tlumeny"])
+        self.lbl_kniha_cesta.nastav(str(Path(kniha).parent) if kniha else "")
+        self.lbl_hlas.nastav(Path(hlas).name if hlas else T("vychozi_hlas"))
+        self.lbl_hlas.configure(fg=b["text"] if hlas else b["tlumeny"])
+        self.lbl_hlas_cesta.nastav(str(Path(hlas).parent) if hlas else T("hint_hlas"))
+        if hlas and not self.bezi:
+            self.odkaz_hlas_pryc.grid()
         else:
-            sirka_sloupce = 3
-            mezera = 2
-            pocet = min(len(hladiny), max(1, sirka // (sirka_sloupce + mezera)))
-            vzorek = hladiny[-pocet:]
-            stred = vyska / 2.0
-            for i, h in enumerate(vzorek):
-                # RMS řeči se drží nízko, proto odmocnina a strop na 0.35
-                podil = min(1.0, (h / 0.35) ** 0.5)
-                v = max(1.0, podil * (vyska * 0.42))
-                x = sirka - (pocet - i) * (sirka_sloupce + mezera)
-                cerstvost = i / float(pocet)
-                barva = BARVY["akcent"] if cerstvost > 0.75 else "#3f5a91"
-                platno.create_rectangle(x, stred - v, x + sirka_sloupce, stred + v,
-                                        fill=barva, outline="")
+            self.odkaz_hlas_pryc.grid_remove()
+        self.lbl_vystup_cesta.nastav(slozka)
+        self.lbl_jazyk_info.nastav(self.var_jazyk_info.get())
+        self.lbl_jazyk_info.configure(fg=b["uspech"] if getattr(self, "_jazyk_stazeny", True) else b["tlumeny"])
 
-        self.after(80, self._vykresli_hladinu)
+        zapnuty, vypnuty = (b["plocha"], b["na_plose"]), (b["pole"], b["tlumeny"])
+        for seg, aktivni in ((self.seg_wav, not mp3), (self.seg_mp3, mp3)):
+            bg, fg = zapnuty if aktivni else vypnuty
+            seg.configure(bg=bg, fg=fg, font=self.F["pole_t"] if aktivni else self.F["maly"])
+        if mp3:
+            self.cb_bitrate.grid()
+        else:
+            self.cb_bitrate.grid_remove()
+        odhad = self._odhad_audia_s()
+        if odhad:
+            bajtu_za_s = (int(self.var_bitrate.get().rstrip("k") or 128) * 1000 / 8.0) if mp3 else 24000 * 2
+            self.lbl_velikost.configure(text=T("velikost_odhad", round(odhad * bajtu_za_s / 1024 ** 2)))
+        else:
+            self.lbl_velikost.configure(text="")
+        for chip in self.chipy:
+            chip.obarvi()
+
+        vystup = f"MP3 {self.var_bitrate.get()}" if mp3 else "WAV"
+        casti = [Path(kniha).name if kniha else T("zadna_kniha"),
+                 Path(hlas).name if hlas else T("vychozi_hlas"), vystup]
+        self.lbl_souhrn.nastav("   ·   ".join(casti))
+
+        if self.bloky:
+            znaku = sum(len(t) for _, t in self.bloky)
+            self.lbl_pripraveno.configure(text=T("pripraveno"))
+            self.lbl_pripraveno_info.configure(text=T(
+                "pripraveno_info", Path(kniha).name, f"{znaku:,}".replace(",", " "), len(self.bloky),
+                lidsky_cas(odhad)))
+            self.btn_jina_kniha.text(T("btn_nacist_jinou"))
+            self.btn_start.povol(True)
+        else:
+            self.lbl_pripraveno.configure(text=T("vyberte_knihu"))
+            self.lbl_pripraveno_info.configure(text=self.var_soubor_info.get() or T("vyberte_knihu_info"))
+            self.btn_jina_kniha.text(T("btn_vybrat_knihu"))
+            self.btn_start.povol(False)
+
+    def _odhad_audia_s(self) -> float:
+        return sum(self._odhady_kapitol())
+
+    def _odhady_kapitol(self) -> list:
+        """Délka kapitol podle textu - čte se 13,5 znaku za sekundu plus pauzy."""
+        pauza = max(0, int(self.var_pauza.get() or 0)) / 1000.0
+        odhady = [0.0] * len(self.kapitoly)
+        for kap_i, text in self.bloky:
+            odhady[kap_i] += len(text) / 13.5 + pauza
+        return odhady
+
+    def otevri_pokrocile(self):
+        dialog = DialogPokrocile(self, zamceno=self.bezi)
+        self.wait_window(dialog)
+        self._po_zmene_nastaveni()
 
     # ------------------------------------------------------------------
-    def zobraz_obalku(self, cesta: Path):
-        """Vykreslí vygenerovanou obálku do malého náhledu."""
-        try:
-            from PIL import Image, ImageTk
-        except ImportError:
+    #  Karta stavu
+    # ------------------------------------------------------------------
+    def _obnov_stav(self):
+        if not self._gui_hotove or self.stav_prevodu == "nezahajeno":
             return
-        try:
-            obr = Image.open(str(cesta)).resize((104, 104), Image.LANCZOS)
-            self._obalka_foto = ImageTk.PhotoImage(obr)   # nesmí ji sebrat GC
-            self.platno_obalka.delete("all")
-            self.platno_obalka.create_image(0, 0, anchor="nw", image=self._obalka_foto)
-            self.obalka_cesta = Path(cesta)
-        except Exception as chyba:
-            self.log(T("log_obalka_nahled", chyba))
-
-    # ------------------------------------------------------------------
-    #  Kapitoly v ukazateli průběhu
-    # ------------------------------------------------------------------
-    def _aktualizuj_pruh_kapitol(self):
-        """Pruh, rysky a popisek kapitol ukáže jen u knihy, která kapitoly má."""
-        ma = len(self.kapitoly) > 1
-        for w in (self.platno_kapitol, self.pruh_kapitoly, self.popisek_kapitoly):
-            if ma:
-                w.grid()
+        b, stav, p = BARVY, self.stav_prevodu, self._prevod
+        odznaky = {"bezi": ("odznak_prevadi", b["plocha"]), "pozastaveno": ("odznak_pauza", b["varovani"]),
+                   "dokonceno": ("odznak_hotovo", b["uspech"]), "zastaveno": ("odznak_zastaveno", b["stopa2"]),
+                   "chyba": ("odznak_chyba", b["chyba"])}
+        klic, barva = odznaky[stav]
+        self.lbl_odznak.configure(text=T(klic), bg=barva,
+                                  fg=b["text"] if stav == "zastaveno" else b["na_plose"])
+        if stav in ("bezi", "pozastaveno"):
+            if self.stop_event.is_set():
+                popis = T("stav_zastavuji")
+            elif self._stav_text == T("stav_mp3"):
+                popis = self._stav_text
             else:
-                w.grid_remove()
-        if not ma:
-            self.var_postup_kapitola.set(0.0)
-            self.var_kapitola_info.set("")
-        self._vykresli_rysky_kapitol()
+                popis = T("uplynulo", kratky_cas(time.time() - p.get("start", time.time())))
+        else:
+            popis = {"dokonceno": T("ulozeno_ve_vystupu"), "zastaveno": T("lze_navazat"),
+                     "chyba": T("stav_chyba")}[stav]
+        self.lbl_stav_popis.configure(text=popis)
+        self.lbl_titul.configure(text=self.titul_knihy or self.nazev_knihy)
+        self.lbl_autor.configure(text=self.autor_knihy)
+
+        for tlacitko in self.tlacitka_stavu.winfo_children():
+            tlacitko.pack_forget()
+        if stav in ("bezi", "pozastaveno"):
+            self.btn_pauza.text(T("btn_pokracovat") if stav == "pozastaveno" else T("btn_pauza"))
+            self.btn_pauza.pack(side="left")
+            self.btn_stop.pack(side="left", padx=(self.px(9), 0))
+        else:
+            self.btn_otevrit.pack(side="left")
+            self.btn_novy.pack(side="left", padx=(self.px(9), 0))
+
+        hotovo, celkem = p.get("hotovo", 0), max(1, p.get("celkem", len(self.bloky)) or 1)
+        kap = p.get("kapitola", 0)
+        n = len(self.kapitoly)
+        if n > 1:
+            if stav in ("bezi", "pozastaveno"):
+                self.lbl_generuje.configure(text=T("generuje_kapitolu", kap + 1, n))
+            else:
+                self.lbl_generuje.configure(text=T("kapitola_x_z", min(kap + 1, n), n))
+            self.lbl_kap_nazev.nastav(self.kapitoly[kap]["nazev"] if 0 <= kap < n else "")
+        else:
+            self.lbl_generuje.configure(text=T("generuje_blok", hotovo, celkem) if stav in ("bezi", "pozastaveno")
+                                        else T("bloky_x_z", hotovo, celkem))
+            self.lbl_kap_nazev.nastav("")
+        self.lbl_procenta.configure(text=T("procent_knihy", int(100 * hotovo / celkem)))
+
+        vygenerovano = odhad = 0.0
+        odhady = self._odhady_kapitol()
+        for i in range(n):
+            info = self.prehravac.kapitola(i)
+            delka = (info["do"] - info["od"]) / float(self.prehravac.sr) if info and info["do"] > info["od"] else 0.0
+            vygenerovano += delka
+            odhad += delka if info and info["hotova"] else max(delka, odhady[i] if i < len(odhady) else 0.0)
+        self.lbl_hotovo.configure(text=T("hotovo_z", lidsky_cas(vygenerovano), lidsky_cas(odhad)))
+        zbyva = p.get("zbyva", -1)
+        self.lbl_zbyva.configure(text=T("zbyva", lidsky_cas(zbyva)) if stav == "bezi" and zbyva > 0 else "")
+        self._kresli_postup()
+        self._kresli_mapu()
+
+    def _kresli_postup(self):
+        c = self.platno_postup
+        c.delete("all")
+        p = self._prevod
+        podil = p.get("hotovo", 0) / float(max(1, p.get("celkem", 1) or 1))
+        c.create_rectangle(0, 0, c.winfo_width() * min(1.0, podil), c.winfo_height(),
+                           fill=BARVY["plocha"], outline="")
 
     def _konec_kapitoly(self, kap_i: int) -> int:
         """Kolik bloků knihy je hotovo, když skončí kapitola kap_i."""
@@ -3990,36 +4713,267 @@ class Aplikace(tk.Tk):
             return self.kapitoly[kap_i + 1]["prvni_blok"]
         return len(self.bloky)
 
-    def _vykresli_rysky_kapitol(self):
-        """Svislé rysky na hranicích kapitol, právě převáděná kapitola podtržená."""
-        platno = self.platno_kapitol
-        platno.delete("all")
-        if len(self.kapitoly) <= 1 or not self.bloky:
+    def _kresli_mapu(self):
+        """Proužek za každou kapitolu: hotová plná, převáděná vyšší s výplní podle postupu."""
+        n = len(self.kapitoly)
+        if n <= 1:
+            self.ramec_mapa.grid_remove()
             return
-        sirka = max(platno.winfo_width(), 1)
-        vyska = max(platno.winfo_height(), 1)
-        celkem = float(len(self.bloky))
-        for i, kap in enumerate(self.kapitoly):
-            x = min(sirka - 1.0, kap["prvni_blok"] / celkem * sirka)
-            if i == self._kapitola_v_behu:
-                x2 = min(float(sirka), self._konec_kapitoly(i) / celkem * sirka)
-                platno.create_rectangle(x, vyska - 3, max(x + 1.0, x2), vyska,
-                                        fill=BARVY["akcent"], outline="")
-            platno.create_line(x, 0, x, vyska, fill=BARVY["linka"])
+        self.ramec_mapa.grid()
+        b, px, c = BARVY, self.px, self.platno_mapa
+        c.delete("all")
+        sirka, vyska = max(c.winfo_width(), 1), px(26)
+        mezera = px(2) if sirka / n > px(6) else (1 if sirka / n > 2 else 0)
+        w = (sirka - mezera * (n - 1)) / float(n)
+        kap_b = self._prevod.get("kapitola", -1)
+        generuje = self.stav_prevodu in ("bezi", "pozastaveno")
+        hotovych = 0
+        for i in range(n):
+            x0 = i * (w + mezera)
+            info = self.prehravac.kapitola(i)
+            hotova = bool(info and info["hotova"])
+            hotovych += hotova
+            if generuje and i == kap_b:
+                prvni = self.kapitoly[i]["prvni_blok"]
+                bloku = max(1, self._konec_kapitoly(i) - prvni)
+                podil = min(1.0, max(0.0, (self._prevod.get("hotovo", 0) - prvni) / float(bloku)))
+                c.create_rectangle(x0, 0, x0 + w, vyska, fill=b["stopa2"], outline="")
+                c.create_rectangle(x0, vyska * (1 - podil), x0 + w, vyska, fill=b["plocha"], outline="")
+            else:
+                c.create_rectangle(x0, vyska - px(16), x0 + w, vyska,
+                                   fill=b["plocha"] if hotova else b["stopa"], outline="")
+        self.lbl_mapa.configure(text=T("mapa_kapitol", hotovych, n))
+        self._sirka_pruzku = (w, mezera)
 
-    def _postup_kapitoly(self, hotovo: int, kap_i: int):
-        """Druhý pruh a jeho popisek podle pozice uvnitř převáděné kapitoly."""
-        if len(self.kapitoly) <= 1 or not 0 <= kap_i < len(self.kapitoly):
+    def _klik_mapa(self, udalost):
+        n = len(self.kapitoly)
+        w, mezera = getattr(self, "_sirka_pruzku", (0, 0))
+        if n <= 1 or w <= 0:
             return
-        prvni = self.kapitoly[kap_i]["prvni_blok"]
-        bloku = self._konec_kapitoly(kap_i) - prvni
-        v_kapitole = hotovo - prvni
-        self.var_postup_kapitola.set(100.0 * v_kapitole / bloku if bloku else 0.0)
-        self.var_kapitola_info.set(T("prubeh_kapitola", kap_i + 1, len(self.kapitoly),
-                                     v_kapitole, bloku))
-        if kap_i != self._kapitola_v_behu:
-            self._kapitola_v_behu = kap_i
-            self._vykresli_rysky_kapitol()
+        i = min(n - 1, int(udalost.x // (w + mezera)))
+        info = self.prehravac.kapitola(i)
+        if info and Prehravac._ma_zvuk(info):
+            self.prehravac.vyber(i)
+
+    # ------------------------------------------------------------------
+    #  Přehrávač a seznam kapitol
+    # ------------------------------------------------------------------
+    def _obnov_prehravac(self):
+        """Čtyřikrát za sekundu: vlna, pozice, ikona a seznam, když se změnil."""
+        if self._gui_hotove and self.stav_prevodu != "nezahajeno":
+            st = self.prehravac.stav()
+            self.ik_hrat.nastav("pauza" if st["hraje"] else "hrat")
+            self._kresli_vlnu(st)
+            podpis = (st["kapitola"], st["hraje"], self.filtr_kapitol, self.prehravac.podpis())
+            if podpis != self._podpis_seznamu:
+                self._podpis_seznamu = podpis
+                self._kresli_kapitoly()
+            rostouci = any(k[3] for k in podpis[3])
+            self.btn_zive.povol(rostouci)
+            self.btn_opravit_misto.povol(not self.bezi and st["kapitola"] >= 0)
+            for ikona in (self.ik_predchozi, self.ik_zpet, self.ik_vpred, self.ik_dalsi):
+                ikona.povol(st["kapitola"] >= 0)
+            self._tiky = getattr(self, "_tiky", 0) + 1
+            if self._tiky % 4 == 0 and self.stav_prevodu in ("bezi", "pozastaveno"):
+                self._obnov_stav()
+        self.after(250, self._obnov_prehravac)
+
+    def _kresli_vlnu(self, st: dict):
+        b, px, c = BARVY, self.px, self.platno_vlna
+        c.delete("all")
+        sirka, vyska = max(c.winfo_width(), 1), max(c.winfo_height(), 1)
+        kap = st["kapitola"]
+        if kap < 0:
+            c.create_text(sirka / 2, vyska / 2, text=T("prehravac_prazdny"), fill=b["tlumeny"], font=self.F["maly"])
+            for popisek in (self.lbl_pozice, self.lbl_delka):
+                popisek.configure(text="")
+            self.lbl_vlna_info.nastav("")
+            return
+        sloupec, mezera = max(2, px(3)), 1
+        pocet = max(10, sirka // (sloupec + mezera))
+        vysky, dostupne = sloupce_vlny(st["obalka"], st["okno"], st["dostupno"], st["osa"], pocet)
+        pozice = st["pozice_s"] * self.prehravac.sr
+        osa = max(1, st["osa"])
+        stred = vyska / 2.0
+        for j, (h, ma) in enumerate(zip(vysky, dostupne)):
+            x = j * (sloupec + mezera)
+            if not ma:
+                v, barva = px(4), b["stopa"]
+            else:
+                v = px(6) + h * (vyska - px(6))
+                barva = b["plocha"] if (j + 0.5) / pocet * osa <= pozice else b["zasoba"]
+            c.create_rectangle(x, stred - v / 2, x + sloupec, stred + v / 2, fill=barva, outline="")
+        xp = pozice / osa * pocet * (sloupec + mezera)
+        c.create_rectangle(xp - 1, 0, xp + 1, vyska, fill=b["text"], outline="")
+        self._geometrie_vlny = (pocet, sloupec + mezera)
+
+        nazev = self.kapitoly[kap]["nazev"] if kap < len(self.kapitoly) else ""
+        info = T("vlna_info", kap + 1, nazev or T("kapitola_n", kap + 1))
+        if st["nacita"]:
+            info = T("prehravac_nacita")
+        elif st["roste"]:
+            info += T("vlna_vygenerovano", formatuj_cas(st["dostupno"] / float(self.prehravac.sr)))
+        self.lbl_pozice.configure(text=formatuj_cas(st["pozice_s"]))
+        self.lbl_vlna_info.nastav(info)
+        self.lbl_delka.configure(text=("~" if st["roste"] else "") + formatuj_cas(osa / float(self.prehravac.sr)))
+
+    def _klik_vlna(self, udalost):
+        pocet, krok = getattr(self, "_geometrie_vlny", (0, 0))
+        if pocet and krok:
+            self.prehravac.skoc(max(0.0, udalost.x / float(pocet * krok)))
+
+    def _nastav_filtr(self, filtr: str):
+        self.filtr_kapitol = filtr
+        self._obarvi_filtr()
+        self.platno_kap.yview_moveto(0)
+        self._kresli_kapitoly()
+
+    def _obarvi_filtr(self):
+        b = BARVY
+        for pilulka, klic in ((self.pil_vse, "vse"), (self.pil_poslech, "poslech")):
+            aktivni = self.filtr_kapitol == klic
+            pilulka.configure(bg=b["plocha"] if aktivni else b["pole"],
+                              fg=b["na_plose"] if aktivni else b["tlumeny"])
+
+    def _radky_kapitol(self) -> list:
+        st = self.prehravac.stav()
+        radky = []
+        for i, kap in enumerate(self.kapitoly):
+            info = self.prehravac.kapitola(i)
+            ma_zvuk = bool(info and Prehravac._ma_zvuk(info))
+            if info and info["roste"]:
+                stav = "generuje"
+            elif ma_zvuk:
+                stav = "hotova"
+            else:
+                stav = "ceka"
+            if self.filtr_kapitol == "poslech" and not ma_zvuk:
+                continue
+            delka = (info["do"] - info["od"]) / float(self.prehravac.sr) if ma_zvuk and info["do"] > info["od"] else None
+            radky.append({"i": i, "nazev": kap["nazev"] or T("kapitola_n", i + 1), "stav": stav,
+                          "delka": delka, "aktivni": i == st["kapitola"], "hraje": st["hraje"],
+                          "ma_zvuk": ma_zvuk})
+        return radky
+
+    def _kresli_kapitoly(self):
+        if not self._gui_hotove:
+            return
+        b, f, px, c = BARVY, self.F, self.px, self.platno_kap
+        c.delete("all")
+        sirka, vr = max(c.winfo_width(), 10), px(44)
+        self._radky_seznamu = self._radky_kapitol()
+        for r, p in enumerate(self._radky_seznamu):
+            y = r * vr
+            if p["aktivni"]:
+                c.create_rectangle(0, y, sirka, y + vr, fill=b["aktivni_radek"], outline="")
+                c.create_rectangle(0, y, px(3), y + vr, fill=b["plocha"], outline="")
+            c.create_text(px(18), y + vr / 2, text=f"{p['i'] + 1:02d}", anchor="w", font=f["maly"], fill=b["tlumeny"])
+            font_nazvu = f["pole_t"] if p["aktivni"] else f["pole"]
+            nazev = zkrat_text(p["nazev"], font_nazvu, sirka - px(50) - px(44))
+            barva_nazvu = b["text"] if p["stav"] != "ceka" else b["tlumeny"]
+            if p["stav"] == "generuje":
+                stav_text = T("kap_generuje", formatuj_cas(p["delka"] or 0))
+            elif p["stav"] == "hotova":
+                stav_text = formatuj_cas(p["delka"]) if p["delka"] else "—"
+            else:
+                stav_text = ""
+            if stav_text:
+                c.create_text(px(50), y + px(15), text=nazev, anchor="w", font=font_nazvu, fill=barva_nazvu)
+                c.create_text(px(50), y + px(31), text=stav_text, anchor="w", font=f["maly"],
+                              fill=b["akcent"] if p["stav"] == "generuje" else b["tlumeny"])
+            else:
+                c.create_text(px(50), y + vr / 2, text=nazev, anchor="w", font=font_nazvu, fill=barva_nazvu)
+            if p["ma_zvuk"]:
+                x, yc = sirka - px(24), y + vr / 2
+                barva = b["akcent"] if p["aktivni"] else b["tlumeny"]
+                if p["aktivni"] and p["hraje"]:
+                    for dx in (0, px(6)):
+                        c.create_rectangle(x + dx, yc - px(5), x + dx + px(3), yc + px(5), fill=barva, outline="")
+                else:
+                    c.create_polygon(x, yc - px(5), x, yc + px(5), x + px(8), yc, fill=barva, outline="")
+            c.create_line(0, y + vr - 1, sirka, y + vr - 1, fill=b["linka"])
+        celkem = len(self._radky_seznamu) * vr
+        vyska = min(px(620), max(vr, celkem))
+        c.configure(scrollregion=(0, 0, sirka, max(celkem, 1)))
+        if int(float(c.cget("height"))) != vyska:
+            c.configure(height=vyska)
+        if celkem > vyska:
+            self.posuv_kap.grid()
+        else:
+            self.posuv_kap.grid_remove()
+
+    def _klik_kapitola(self, udalost):
+        r = int(self.platno_kap.canvasy(udalost.y) // self.px(44))
+        radky = getattr(self, "_radky_seznamu", [])
+        if 0 <= r < len(radky) and radky[r]["ma_zvuk"]:
+            st = self.prehravac.stav()
+            if st["kapitola"] == radky[r]["i"]:
+                self.prehravac.prepni()
+            else:
+                self.prehravac.vyber(radky[r]["i"])
+
+    def oprav_hrane_misto(self):
+        st = self.prehravac.stav()
+        if self.bezi or st["kapitola"] < 0 or not st["cesta"]:
+            return
+        # U knihy v jednom souboru je kapitola jen úsek, čas se počítá od začátku souboru
+        self.oprav_usek(Path(st["cesta"]), st["pozice_s"] + st["od"] / float(self.prehravac.sr))
+
+    def zobraz_obalku(self, cesta: Path):
+        """Vykreslí vygenerovanou obálku do karty stavu."""
+        try:
+            from PIL import Image, ImageTk
+        except ImportError:
+            return
+        v = self.px(76)
+        obr = Image.open(str(cesta)).resize((v, v), Image.LANCZOS)
+        self._obalka_foto = ImageTk.PhotoImage(obr, master=self)   # nesmí ji sebrat GC
+        self.platno_obalka.delete("all")
+        self.platno_obalka.create_image(0, 0, anchor="nw", image=self._obalka_foto)
+        self.obalka_cesta = Path(cesta)
+
+    # ------------------------------------------------------------------
+    #  Log a fronta zpráv z pracovního vlákna
+    # ------------------------------------------------------------------
+    def log(self, zprava: str):
+        if zprava.startswith(("CHYBA", "ERROR")):
+            znacka = "chyba"
+        elif zprava.startswith(("VAROVÁNÍ", "WARNING")):
+            znacka = "varovani"
+        elif zprava.startswith(("HOTOVO", "DONE")):
+            znacka = "uspech"
+        else:
+            znacka = "bezny"
+        if znacka == "chyba":
+            self.pocet_chyb += 1
+        radek = (time.strftime("%H:%M:%S  "), zprava, znacka)
+        self._log_radky.append(radek)
+        del self._log_radky[:-5000]
+        if self._gui_hotove:
+            self._vloz_do_logu([radek])
+            self._obnov_souhrn_logu()
+
+    def _vloz_do_logu(self, radky):
+        self.log_box.config(state="normal")
+        for cas, zprava, znacka in radky:
+            self.log_box.insert("end", cas, "cas")
+            self.log_box.insert("end", f"{zprava}\n", znacka)
+        self.log_box.see("end")
+        self.log_box.config(state="disabled")
+
+    def _obnov_log_z_pameti(self):
+        self._vloz_do_logu(self._log_radky)
+        self._obnov_souhrn_logu()
+
+    def _obnov_souhrn_logu(self):
+        if self._prevod:
+            text = T("log_souhrn_radek", self._prevod.get("hotovo", 0), self.pocet_chyb)
+        else:
+            text = T("log_chyb", self.pocet_chyb)
+        self.lbl_log_souhrn.configure(text=text)
+
+    def log_z_vlakna(self, zprava: str):
+        self.fronta.put(("log", zprava))
 
     def _zpracuj_frontu(self):
         try:
@@ -4029,13 +4983,28 @@ class Aplikace(tk.Tk):
                     self.log(data)
                 elif typ == "postup":
                     hotovo, celkem, uplynulo, zbyva, kap_i = data
-                    self.var_postup.set(100.0 * hotovo / celkem if celkem else 0.0)
-                    self.var_bloky_info.set(T("prubeh_bloky", hotovo, celkem))
-                    self.var_cas_info.set(
-                        T("prubeh_cas", formatuj_cas(uplynulo), formatuj_cas(zbyva)))
-                    self._postup_kapitoly(hotovo, kap_i)
+                    self._prevod.update(hotovo=hotovo, celkem=celkem, zbyva=zbyva, kapitola=kap_i)
+                    self._obnov_stav()
+                    self._obnov_souhrn_logu()
+                elif typ == "zvuk":
+                    kap_i, cesta, od, do, hotova = data
+                    self.prehravac.aktualizuj(kap_i, cesta=cesta, od=od, do=do, hotova=hotova,
+                                              roste=bool(self.bezi and not hotova))
+                    if self.prehravac.stav()["kapitola"] < 0:
+                        # Přehrávač rovnou ukáže, co vzniká - hrát začne až na pokyn
+                        self.prehravac.vyber(kap_i, 0.0, hrat=False)
+                elif typ == "kapitola_hotova":
+                    self.prehravac.aktualizuj(data, hotova=True, roste=False)
+                elif typ == "prejmenovano":
+                    self.prehravac.prejmenuj(*data)
+                elif typ == "sr":
+                    if data != self.prehravac.sr:
+                        self.prehravac.zastav()
+                        self.prehravac = Prehravac(data, self.log_z_vlakna)
+                        self.prehravac.nastav_kapitoly(self._odhady_kapitol())
                 elif typ == "stav":
                     self.var_stav.set(data)
+                    self._stav_text = data
                 elif typ == "hotovo":
                     self._prevod_dokoncen(data)
                 elif typ == "chyba":
@@ -4043,7 +5012,7 @@ class Aplikace(tk.Tk):
                 elif typ == "obalka":
                     self.zobraz_obalku(Path(data))
                 elif typ == "test_hotovo":
-                    self.btn_test.config(state="normal")
+                    self.btn_test.povol(True)
                     self.var_stav.set(T("stav_pripraveno"))
                     if data:
                         self.prehraj(Path(data))
@@ -4092,26 +5061,44 @@ class Aplikace(tk.Tk):
         except Exception as chyba:
             messagebox.showerror(T("dlg_chyba"), T("dlg_slozka", chyba))
 
-    def oprav_usek(self):
+    def oprav_usek(self, soubor: Path = None, cas: float = None):
         if self.bezi:
             messagebox.showinfo(T("dlg_probiha"), T("dlg_pockejte"))
             return
-        slozka = Path(self.var_vystup_slozka.get().strip('" ') or (APP_DIR / "vystup"))
-        nazev = re.sub(ZAKAZANE_ZNAKY, "_", self.var_vystup_nazev.get().strip()
-                       or self.nazev_knihy or "audiokniha")
-        kniha = slozka / nazev
-        self.wait_window(DialogOprava(self, kniha if kniha.is_dir() else slozka))
+        self.prehravac.pozastav()
+        if soubor is not None:
+            slozka = Path(soubor).parent
+        else:
+            slozka = Path(self.var_vystup_slozka.get().strip('" ') or (APP_DIR / "vystup"))
+            nazev = re.sub(ZAKAZANE_ZNAKY, "_", self.var_vystup_nazev.get().strip()
+                           or self.nazev_knihy or "audiokniha")
+            if (slozka / nazev).is_dir():
+                slozka = slozka / nazev
+        dialog = DialogOprava(self, slozka, soubor=soubor, cas=cas)
+        self.wait_window(dialog)
+        for cesta in dialog.nahrazene:
+            self.prehravac.zneplatni(cesta)
 
     def prehraj(self, cesta: Path):
-        try:
-            os.startfile(str(cesta))
-        except Exception:
-            self.log(T("log_ulozen", cesta))
+        """Krátká ukázka (test hlasu, oprava úseku) přímo na zvukovou kartu."""
+        if not Prehravac.dostupny():
+            try:
+                os.startfile(str(cesta))
+            except Exception:
+                self.log(T("log_ulozen", cesta))
+            return
+        import numpy as np
+        import sounddevice as sd
+
+        self.prehravac.pozastav()
+        with wave.open(str(cesta), "rb") as w:
+            data = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+            sd.play(data, w.getframerate())
 
     # ------------------------------------------------------------------
     #  Načtení a příprava textu
     # ------------------------------------------------------------------
-    def nacti_a_priprav(self):
+    def nacti_a_priprav(self, tise: bool = False):
         cesta_txt = self.var_vstup.get().strip('" ')
         if not cesta_txt:
             messagebox.showwarning(T("dlg_chybi_soubor"), T("dlg_vyberte"))
@@ -4148,18 +5135,16 @@ class Aplikace(tk.Tk):
             if not self.bloky:
                 raise ValueError("Text se nepodařilo rozdělit na bloky.")
             self.ma_kapitoly = ma_kapitoly and len(self.kapitoly) > 1
-            self._kapitola_v_behu = -1
-            self.var_postup_kapitola.set(0.0)
-            self.var_kapitola_info.set("")
-            self._aktualizuj_pruh_kapitol()
-
             self.nazev_knihy = cesta.stem
+            metadata = nacti_metadata(cesta)
+            self.titul_knihy, self.autor_knihy = metadata["titul"], metadata["autor"]
             znaku = sum(len(b) for _, b in self.bloky)
-            # Zhruba 14 znaků za sekundu mluveného českého textu
-            odhad_audio = znaku / 14.0 + len(self.bloky) * (self.var_pauza.get() / 1000.0)
 
-            self.var_soubor_info.set(T("info_soubor", cesta.name, f"{znaku:,}".replace(",", " "),
-                                       len(self.bloky), formatuj_cas(odhad_audio)))
+            self.var_soubor_info.set("")
+            if not self.bezi and self.stav_prevodu != "nezahajeno":
+                self.stav_prevodu = "nezahajeno"
+                self._prepni_zobrazeni()
+            self._po_zmene_nastaveni()
             self.log(T("log_nacteno", znaku, len(self.bloky), max_znaku))
             if self.ma_kapitoly:
                 self.log(T("log_kapitoly", len(self.kapitoly)))
@@ -4172,10 +5157,11 @@ class Aplikace(tk.Tk):
             self.bloky = []
             self.kapitoly = []
             self.ma_kapitoly = False
-            self._aktualizuj_pruh_kapitol()
             self.var_soubor_info.set(T("info_nezdarilo"))
+            self._po_zmene_nastaveni()
             self.log(T("log_chyba", chyba))
-            messagebox.showerror(T("dlg_chyba_nacteni"), str(chyba))
+            if not tise:
+                messagebox.showerror(T("dlg_chyba_nacteni"), str(chyba))
 
     # ------------------------------------------------------------------
     #  Test hlasu
@@ -4190,7 +5176,7 @@ class Aplikace(tk.Tk):
             messagebox.showwarning(T("dlg_chybi_text"), T("dlg_zadejte"))
             return
 
-        self.btn_test.config(state="disabled")
+        self.btn_test.povol(False)
         self.var_stav.set(T("stav_ukazka"))
         self._uloz_config()
 
@@ -4244,8 +5230,6 @@ class Aplikace(tk.Tk):
             "pauza_ms": int(self.var_pauza.get()),
             "format": self.var_format.get(),
             "bitrate": self.var_bitrate.get(),
-            "poslouchat": bool(self.var_poslouchat.get()),
-            "naskok_s": max(5, int(self.var_naskok.get())),
             "obalka": bool(self.var_obalka.get()),
             "pracovniku": int(self.var_pracovniku.get()),
         }
@@ -4264,24 +5248,10 @@ class Aplikace(tk.Tk):
     def _nazev_nastaveni(self, klic: str) -> str:
         return T(self.NAZVY_NASTAVENI.get(klic, klic))
 
-    def pokracuj_v_rozdelanem(self):
-        """Nabídne seznam přerušených převodů a v tom vybraném pokračuje."""
+    def pokracuj_v_rozdelanem(self, vybrany: dict):
+        """Pokračuje v přerušeném převodu vybraném na úvodní obrazovce."""
         if self.bezi:
             return
-
-        slozky = [Path(self.var_vystup_slozka.get().strip('" ') or (APP_DIR / "vystup")),
-                  APP_DIR / "vystup"]
-        zaznamy = najdi_rozdelane(slozky)
-        if not zaznamy:
-            messagebox.showinfo(T("dlg_zadne_rozdelane"), T("dlg_zadne_rozdelane_text"))
-            return
-
-        dialog = DialogRozdelane(self, zaznamy, self.font_rodina)
-        self.wait_window(dialog)
-        vybrany = dialog.vybrany
-        if vybrany is None:
-            return
-
         zdroj = vybrany.get("zdroj") or ""
         if not zdroj or not Path(zdroj).exists():
             messagebox.showerror(T("dlg_chyba"), T("dlg_zdroj_pryc", zdroj or "?"))
@@ -4342,7 +5312,7 @@ class Aplikace(tk.Tk):
                 zmeneno.append("jazyk_textu")
             self._popis_jazyka()
 
-        self._aktualizuj_popisky_posuvniku()
+        self._po_zmene_nastaveni()
         return zmeneno
 
 
@@ -4423,25 +5393,10 @@ class Aplikace(tk.Tk):
 
         self._uloz_config()
 
-        # Předchozí přehrávač může ještě dobírat zásobu z minulého převodu
-        if self.prehravac is not None:
-            self.prehravac.zastav()
-            self.prehravac = None
-
         self.bezi = True
         self.stop_event.clear()
         self.pause_event.clear()
-        self.btn_start.config(state="disabled")
-        self.btn_navazat.config(state="disabled")
-        self.btn_test.config(state="disabled")
-        self.btn_pauza.config(state="normal", text=T("btn_pauza"))
-        self.btn_stop.config(state="normal")
-        self._zamkni_ovladani(True)      # formát ani cesty už za běhu neměnit
-        self.var_postup.set(100.0 * od_bloku / len(self.bloky) if od_bloku else 0.0)
-        self.var_postup_kapitola.set(0.0)
-        self._kapitola_v_behu = -1
-        self._vykresli_rysky_kapitol()
-        self.var_poslech_info.set("")
+        self._zahaj_zobrazeni_prevodu(od_bloku)
 
         self.vlakno = threading.Thread(
             target=self._worker_prevod,
@@ -4449,15 +5404,35 @@ class Aplikace(tk.Tk):
             daemon=True)
         self.vlakno.start()
 
+    def _zahaj_zobrazeni_prevodu(self, od_bloku: int):
+        """Okno přejde z úvodní obrazovky na převod s přehrávačem."""
+        self.stav_prevodu = "bezi"
+        self.nastaveni_otevrene = False
+        self._stav_text = ""
+        self.pocet_chyb = 0
+        self.vysledek_cesta = None
+        prvni = self.bloky[min(od_bloku, len(self.bloky) - 1)][0]
+        self._prevod = {"hotovo": od_bloku, "celkem": len(self.bloky), "zbyva": -1,
+                        "kapitola": prvni, "start": time.time()}
+        self.prehravac.nastav_kapitoly(self._odhady_kapitol())
+        self._zamkni_ovladani(True)
+        self._prepni_zobrazeni()
+        self._obnov_stav()
+        self._obnov_souhrn_logu()
+        self._kresli_kapitoly()
+
     def prepni_pauzu(self):
+        if not self.bezi:
+            return
         if self.pause_event.is_set():
             self.pause_event.clear()
-            self.btn_pauza.config(text=T("btn_pauza"))
+            self.stav_prevodu = "bezi"
             self.log(T("log_pokracuji"))
         else:
             self.pause_event.set()
-            self.btn_pauza.config(text=T("btn_pokracovat"))
+            self.stav_prevodu = "pozastaveno"
             self.log(T("log_pozastaveno"))
+        self._obnov_stav()
 
     def zastav(self):
         if not self.bezi:
@@ -4465,7 +5440,9 @@ class Aplikace(tk.Tk):
         if messagebox.askyesno(T("dlg_zastavit"), T("dlg_zastavit_text")):
             self.stop_event.set()
             self.pause_event.clear()
+            self.stav_prevodu = "bezi"
             self.var_stav.set(T("stav_zastavuji"))
+            self._obnov_stav()
 
     # ------------------------------------------------------------------
     def _worker_prevod(self, bloky, zaklad: Path, p: dict, od_bloku: int = 0, postup=None):
@@ -4539,11 +5516,6 @@ class Aplikace(tk.Tk):
                 else:
                     self.log_z_vlakna(T("log_obalka_ne"))
 
-            if p["poslouchat"]:
-                self.prehravac = Prehravac(sr, p["naskok_s"], self.log_z_vlakna)
-                if not self.prehravac.start():
-                    self.prehravac = None
-
             hotove = list(postup.data.get("hotove_soubory") or []) if postup else []
             # Úseky, které se nepodařilo vygenerovat - přežijí i přerušení
             preskocene = postup.preskocene if (postup is not None and od_bloku) else []
@@ -4577,11 +5549,13 @@ class Aplikace(tk.Tk):
                         "track": str(kap_i + 1), "genre": "Audiobook"}
                 if prevod_na_mp3(wav, mp3, p["bitrate"], meta, obalka_cesta):
                     wav.unlink(missing_ok=True)       # WAV už není k ničemu
+                    self.fronta.put(("prejmenovano", (str(wav), str(mp3))))
                     hotove.append(mp3.name)
                     self.log_z_vlakna(T("log_kapitola_hotova", kap_i + 1, mp3.name))
                 else:
                     self.log_z_vlakna(T("log_mp3_selhal"))
                     hotove.append(wav.name)
+                self.fronta.put(("kapitola_hotova", kap_i))
 
             # --- navázání na rozepsaný soubor ---
             self._zapisovac = None
@@ -4597,6 +5571,13 @@ class Aplikace(tk.Tk):
 
             jediny_wav = slozka / (zaklad.stem + ".wav")
 
+            # Přehrávači říct, co z knihy už zní: hotové kapitoly a rozepsaný soubor
+            self.fronta.put(("sr", sr))
+            kap_zvuku, od_kapitoly = -1, 0
+            if od_bloku:
+                kap_zvuku, od_kapitoly = self._ohlas_hotovy_zvuk(bloky, od_bloku, po_kapitolach,
+                                                                 slozka, mapa, sr, p)
+
             if pool is not None:
                 pool._dalsi = od_bloku + 1
 
@@ -4610,6 +5591,11 @@ class Aplikace(tk.Tk):
                     aktualni_kap = kap_i
                     cil = cesta_kapitoly(kap_i) if po_kapitolach else jediny_wav
                     self._zapisovac = WavZapisovacRaw(cil, sr)
+                if kap_i != kap_zvuku:
+                    # Kniha bez rozpadu má kapitoly za sebou v jednom souboru
+                    if kap_zvuku >= 0 and not po_kapitolach:
+                        self.fronta.put(("kapitola_hotova", kap_zvuku))
+                    kap_zvuku, od_kapitoly = kap_i, self._zapisovac.pocet_vzorku
 
                 for text in vynechano:
                     preskocene.append({"blok": index, "kapitola": kap_i + 1, "text": text})
@@ -4620,8 +5606,10 @@ class Aplikace(tk.Tk):
                                 len(vzorky), blok)
                     self._zapisovac.zapis(vzorky)
                     self._zapisovac.zapis_ticho(p["pauza_ms"])
-                    if self.prehravac is not None and self.prehravac.bezi:
-                        self.prehravac.pridej(vzorky, p["pauza_ms"])
+                    # Přehrávač čte rozepsaný soubor z disku, blok tam musí být celý
+                    self._zapisovac.soubor.flush()
+                    self.fronta.put(("zvuk", (kap_i, str(self._zapisovac.cesta), od_kapitoly,
+                                              self._zapisovac.pocet_vzorku, False)))
 
                 if postup is not None:
                     postup.uloz(p, index, celkem, hotove, str(self._zapisovac.cesta),
@@ -4671,18 +5659,15 @@ class Aplikace(tk.Tk):
                             "comment": "Vytvořeno pomocí Chatterbox TTS"}
                     if prevod_na_mp3(jediny_wav, mp3, p["bitrate"], meta, obalka_cesta):
                         jediny_wav.unlink(missing_ok=True)   # při MP3 WAV neuchováváme
+                        self.fronta.put(("prejmenovano", (str(jediny_wav), str(mp3))))
                         vysledek = mp3
                         self.log_z_vlakna(T("log_mp3_hotovo", mp3))
                     else:
                         self.log_z_vlakna(T("log_mp3_selhal"))
+                if not zastaveno and kap_zvuku >= 0:
+                    self.fronta.put(("kapitola_hotova", kap_zvuku))
                 velikost = vysledek.stat().st_size / (1024 * 1024) if vysledek.exists() else 0.0
                 souhrn = T("log_souhrn", formatuj_cas(delka), velikost)
-
-            if self.prehravac is not None and self.prehravac.bezi:
-                zbyva_s = self.prehravac.zasoba_s
-                if zbyva_s > 1:
-                    self.log_z_vlakna(T("log_dobira", formatuj_cas(zbyva_s)))
-                self.prehravac.uzavri_vstup()
 
             if postup is not None:
                 if zastaveno:
@@ -4708,11 +5693,47 @@ class Aplikace(tk.Tk):
             if getattr(self, "_zapisovac", None) is not None:
                 self._zapisovac.zavri()
                 self._zapisovac = None
-            if self.prehravac is not None:
-                self.prehravac.zastav()
             self.log_z_vlakna(T("log_chyba", chyba))
             self.log_z_vlakna(traceback.format_exc(limit=5))
             self.fronta.put(("chyba", str(chyba)))
+
+    def _ohlas_hotovy_zvuk(self, bloky, od_bloku, po_kapitolach, slozka, mapa, sr, p):
+        """Při navázání pošle přehrávači kapitoly, které už zní.
+
+        Vrací (kapitola rozepsaného souboru, její začátek v souboru), aby na ni
+        další bloky navázaly.
+        """
+        z = self._zapisovac
+        kap_ted = bloky[od_bloku][0] if od_bloku < len(bloky) else len(self.kapitoly) - 1
+        if po_kapitolach:
+            for kap_i in range(kap_ted):
+                zaklad = str(slozka / nazev_souboru_kapitoly(kap_i, self.kapitoly[kap_i].get("nazev")))
+                for pripona in (".mp3", ".wav"):
+                    cesta = Path(zaklad + pripona)
+                    if cesta.exists():
+                        self.fronta.put(("zvuk", (kap_i, str(cesta), 0, delka_souboru_vzorku(cesta, sr), True)))
+                        break
+            if z is None:
+                return -1, 0
+            self.fronta.put(("zvuk", (kap_ted, str(z.cesta), 0, z.pocet_vzorku, False)))
+            return kap_ted, 0
+
+        # Jeden soubor na celou knihu: kde která kapitola začíná, ví mapa bloků
+        if z is None:
+            return -1, 0
+        pauza = int(sr * p["pauza_ms"] / 1000.0)
+        zacatky, konce = {}, {}
+        for zaznam in mapa.nacti()[1].get(Path(z.cesta).stem, []):
+            if zaznam["blok"] > od_bloku:
+                continue
+            kap_i = bloky[zaznam["blok"] - 1][0]
+            zacatky.setdefault(kap_i, zaznam["od"])
+            konce[kap_i] = zaznam["od"] + zaznam["delka"] + pauza
+        for kap_i in sorted(zacatky):
+            hotova = kap_i < kap_ted
+            do = min(konce[kap_i] if hotova else z.pocet_vzorku, z.pocet_vzorku)
+            self.fronta.put(("zvuk", (kap_i, str(z.cesta), zacatky[kap_i], do, hotova)))
+        return kap_ted, zacatky.get(kap_ted, 0)
 
     def _proud_bloku(self, bloky, p, od_bloku, pool):
         """Vydává (index, kapitola, text, (vzorky, vynechané úseky)) v původním pořadí.
@@ -4784,35 +5805,33 @@ class Aplikace(tk.Tk):
 
     def _prevod_dokoncen(self, cesta, chyba=None):
         self.bezi = False
-        self.btn_start.config(state="normal")
-        self.btn_navazat.config(state="normal")
-        self.btn_test.config(state="normal")
-        self.btn_pauza.config(state="disabled", text=T("btn_pauza"))
-        self.btn_stop.config(state="disabled")
+        self.prehravac.ukonci_rust()
         self._zamkni_ovladani(False)
-
+        self.vysledek_cesta = cesta
         if chyba:
-            self.var_stav.set(T("stav_chyba"))
-            if self.prehravac is not None:
-                self.prehravac.zastav()
+            self.stav_prevodu = "chyba"
+        else:
+            zastaveno = self.stop_event.is_set()
+            self.stav_prevodu = "zastaveno" if zastaveno else "dokonceno"
+            if not zastaveno:
+                self._prevod["hotovo"] = self._prevod.get("celkem", len(self.bloky))
+        self._obnov_stav()
+        self._kresli_kapitoly()
+        self._obnov_rozdelane()
+        if chyba:
             messagebox.showerror(T("dlg_selhal"), str(chyba))
+
+    def novy_prevod(self):
+        """Zpátky na úvodní obrazovku. Kniha i nastavení zůstanou."""
+        if self.bezi:
             return
-
-        # Zastavení uživatelem ukončí i poslech; po normálním dokončení
-        # necháváme přehrávač dobrat zásobu na pozadí.
-        if self.stop_event.is_set() and self.prehravac is not None:
-            self.prehravac.zastav()
-
-        zastaveno = self.stop_event.is_set()
-        self.var_stav.set(T("stav_zastaveno") if zastaveno else T("stav_hotovo"))
-        if not zastaveno:
-            self.var_postup.set(100.0)
-            self.var_postup_kapitola.set(100.0)
-
-        nadpis = T("stav_zastaveno") if zastaveno else T("dlg_hotovo")
-        popis = T("dlg_zastaveno_text") if zastaveno else T("dlg_hotovo_text")
-        if cesta and messagebox.askyesno(nadpis, f"{popis}\n{cesta}\n\n{T('dlg_otevrit')}"):
-            self.otevri_vystup()
+        self.prehravac.pozastav()
+        self.stav_prevodu = "nezahajeno"
+        self._prevod = {}
+        self._prepni_zobrazeni()
+        self._po_zmene_nastaveni()
+        self._obnov_rozdelane()
+        self._obnov_souhrn_logu()
 
     # ------------------------------------------------------------------
     def pri_zavreni(self):
@@ -4821,8 +5840,7 @@ class Aplikace(tk.Tk):
                 return
             self.stop_event.set()
             self.pause_event.clear()
-            if self.prehravac is not None:
-                self.prehravac.zastav()
+            self.prehravac.zastav()
             self.var_stav.set(T("stav_ukoncuji"))
             self._uloz_config()
             # Nesmíme zavřít okno dřív, než vlákno dopíše WAV hlavičku,
@@ -4830,8 +5848,7 @@ class Aplikace(tk.Tk):
             self._pockej_na_vlakno()
             return
 
-        if self.prehravac is not None:
-            self.prehravac.zastav()
+        self.prehravac.zastav()
         self._uloz_config()
         self.destroy()
 

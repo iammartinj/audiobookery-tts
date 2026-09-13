@@ -74,40 +74,38 @@ S českým fine-tune je to o 2,1 GB víc. Stažení proběhne až při prvním g
 5. **Spustit převod.** Průběh se dá kdykoli pozastavit i zastavit; dosud
    vygenerovaná část zůstane v souboru.
 
+## Okno
+
+Po spuštění je vidět karta nastavení ve třech sloupcích — **zdroj** (kniha
+a jazyk), **hlas** (nahrávka a zkušební věta s tlačítkem *přehrát*)
+a **výstup** (název, složka, WAV nebo MP3 s odhadem velikosti a přepínače
+obálky, lupanců, ořezu a rychlého dekodéru). Expresivita, tempo, teplota,
+velikost bloku, seed a kontrola přepisem jsou pod *pokročilé…*. Pod nastavením
+je karta *připraveno k převodu* a seznam rozdělaných převodů s odkazem
+*pokračovat*.
+
+*Spustit převod* sbalí nastavení do jednoho souhrnného řádku a ukáže převod:
+obálku, průběh knihy, proužek s jedním dílkem za kapitolu, přehrávač a seznam
+kapitol. Podrobný průběh (log) je dole a sbalený.
+
+Tlačítko ☀/☾ v záhlaví přepíná tmavé a světlé schéma. Okno se přizpůsobí
+velikosti — na malé obrazovce se sloupce složí pod sebe a obsah se posouvá,
+takže nic nezůstane pod hranou.
+
 ## Poslech během převodu
 
-Zaškrtnutím *přehrávat během převodu* se hotové bloky rovnou pouštějí do
-reproduktorů. Výsledný soubor se přitom zapisuje dál, takže knihu máte
-i po doposlechnutí.
+Přehrávač hraje přímo z výstupní složky: hotové kapitoly i tu, která právě
+vzniká — tu dočítá, jak přibývají bloky. Na žádný náskok se nečeká. Posouvat
+se dá kamkoli do už vygenerovaného zvuku, o 15 a 30 s, mezi kapitolami nebo
+výběrem v seznamu. *Skočit na živé* přeskočí na nejnovější zvuk. Když
+přehrávání dožene generování, počká na další blok.
 
-Háček je v tom, že generování běží kolem **0,95× realtime** — o něco pomaleji,
-než se stačí poslouchat. Zásoba se proto pomalu tenčí a aplikace nejdřív počká,
-až se nastřádá zadaný **náskok**. Ubývá zhruba dvacetkrát pomaleji, než roste:
+Vlna pod ovládáním pokrývá hranou kapitolu: přehraná část plnou barvou,
+vygenerovaná tlumeně a zbytek kapitoly — délka odhadnutá z textu — jako
+nízká linka.
 
-| náskok | vydrží poslech |
-|---|---|
-| 1 min | ~20 minut |
-| 3 min | ~1 hodina |
-| 10 min | ~3,5 hodiny |
-| 30 min | celá osmihodinová kniha |
-
-Ve stavovém řádku sekce *poslech* běží, kolik zásoby zbývá a jak dlouho ještě
-vydrží. Vedle je vizualizace hlasitosti právě přehrávaného zvuku a náhled
-obálky. Když zásoba dojde, přehrávání počká na další blok — nerozbije se,
-jen se zadrhne.
-
-Poslech jde zapnout i **uprostřed už běžícího převodu**. Navazuje se ale od
-právě generovaného bloku, ne od začátku knihy — co se stihlo vygenerovat
-předtím, je v souboru, ne ve frontě přehrávače.
-
-Pauza zastaví generování, ale ne přehrávání: dobere zásobu a pak čeká.
-Tlačítko *zastavit* ukončí obojí.
-
-Zvukový výstup obstarává `sounddevice` (PortAudio). Když modul chybí, volba se
-tiše přeskočí a do logu se to napíše — převod běží dál bez zvuku.
-
-Během přehrávání jde poslech **pozastavit a zase spustit** tlačítkem v sekci
-*poslech*. Generování běží dál, takže se pauzou zásoba jen zvětšuje.
+Zvukový výstup obstarává `sounddevice` (PortAudio). Když modul chybí,
+přehrávač nebude dostupný a do logu se to napíše — převod běží dál.
 
 ## Jazyk rozhraní
 
@@ -419,7 +417,9 @@ vadné všechny tři pokusy, Whisper je přepíše a vybere ten nejbližší tex
 na kartě, když je vedle modelu hlasu místo, jinak na procesoru. Přeřek v jedné
 hlásce nenajde — „pšipomínal" přepíše jako „připomínal".
 
-**Oprava úseku.** Tlačítko *opravit úsek* otevře dialog nad hotovým souborem.
+**Oprava úseku.** *Opravit toto místo* v přehrávači otevře dialog rovnou na
+hraném místě, *opravit úsek v hotové knize…* na úvodní obrazovce nad libovolným
+hotovým souborem.
 Zadáte čas, kde jste chybu slyšeli, aplikace najde blok a ukáže jeho text — už
 po úpravách výslovnosti, takže „první" se tam objeví jako „prvňí". Text jde
 upravit a přečte se přesně tak, jak je napsaný. *Vygenerovat znovu* udělá
