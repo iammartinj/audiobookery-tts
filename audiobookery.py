@@ -18,6 +18,7 @@ import queue
 import wave
 import shutil
 import struct
+import platform
 import threading
 import traceback
 import subprocess
@@ -258,6 +259,27 @@ NAPOVEDA_TOKEN = (
     "     nebo nastavte proměnnou prostředí HF_TOKEN."
 )
 
+# T3 v MLX - jen na Apple Siliconu. Vypnuto znamená torchovou cestu jako dosud;
+# ostatní hodnoty jsou kvantizace backbonu. Měřeno na M4, 20 běhů po ~200
+# řečových tokenech: float32 58 tok/s a 2,14 GB parametrů, 8 bitů 158 tok/s
+# a 0,70 GB, 4 bity 0,45 GB, ale rychlejší už ne - smyčka je vázaná režií,
+# ne pamětí, takže 4 bity jen ubírají na kvalitě (KL 3e-2 proti 8e-5 u osmi).
+# Torchová cesta na MPS zvládá 27 tok/s a s každým během zpomaluje.
+MLX_VYPNUTO = "off"
+MLX_PRESNOSTI = {MLX_VYPNUTO: None, "8-bit": 8, "4-bit": 4, "float32": None}
+MLX_VOLBY = (MLX_VYPNUTO, "8-bit", "4-bit", "float32")
+# Základní T3 pro jazyky bez fine-tunu - MLX si checkpoint načítá sám.
+MLX_ZAKLADNI_T3 = "t3_mtl23ls_v2.safetensors"
+# MLX si drží vyrovnávací paměť bufferů podle velikosti. Bloky mají různou
+# délku, takže bez stropu cache roste s nejdelším blokem a už se nevrátí.
+MLX_STROP_CACHE_MB = 512
+
+
+def mlx_mozny() -> bool:
+    """Může tady MLX vůbec běžet? Jen platforma, nic se neimportuje."""
+    return sys.platform == "darwin" and platform.machine() == "arm64"
+
+
 DEFAULT_CONFIG = {
     "vstupni_soubor": "",
     "referencni_wav": "",
@@ -277,6 +299,8 @@ DEFAULT_CONFIG = {
     "orezat_okraje": True,
     "rychly_dekoder": False,
     "kontrola_asr": False,
+    # T3 v MLX - uplatní se jen na Apple Siliconu, jinde se ignoruje
+    "mlx_presnost": MLX_VYPNUTO,
     # Podrobný průběh je sbalený - okno ukazuje převod a poslech, ne log
     "sbalene_sekce": {"log": True},
     # Barevné schéma: "tmave" nebo "svetle"
@@ -995,7 +1019,8 @@ NASTAVENI_HLASU = ("jazyk_textu", "referencni_wav", "exaggeration", "cfg_weight"
                    "temperature", "min_p", "seed", "pauza_ms", "format", "bitrate")
 # Opravy. Změna jen zlepší zbytek knihy, takže navázání neblokuje - do logu
 # se ale vypíše. Ke slovníčkům se do stavu přidává i otisk jejich obsahu.
-NASTAVENI_OPRAV = ("odstranit_lupance", "orezat_okraje", "rychly_dekoder", "kontrola_asr")
+NASTAVENI_OPRAV = ("odstranit_lupance", "orezat_okraje", "rychly_dekoder", "kontrola_asr",
+                   "mlx_presnost")
 
 
 def otisk_hlasu(cesta_knihy: Path, p: dict, bloky) -> str:
@@ -1737,6 +1762,27 @@ def rychly_dekoder_stazeny() -> bool:
     return slozka.is_dir() and any(slozka.rglob(RYCHLY_DEKODER_SOUBOR))
 
 
+def uvolni_pamet_zarizeni(zarizeni: str = None):
+    """Vrátí cache alokátoru zpátky systému.
+
+    Na MPS to není kosmetika: alokátor si drží bloky podle největšího dosud
+    viděného tvaru a mezi bloky knihy je nepustí, takže paměť roste s tím
+    nejdelším blokem. Na CUDA má empty_cache() stejný smysl.
+    """
+    try:
+        import torch
+    except Exception:
+        return
+    try:
+        if zarizeni in (None, "cuda") and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if zarizeni in (None, "mps") and getattr(torch.backends, "mps", None) \
+                and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:
+        pass
+
+
 def uvolni_hooky_t3(model) -> int:
     """Zahodí forward hooky, které po sobě chatterbox na T3 nechává.
 
@@ -1806,6 +1852,66 @@ def oprav_predcasny_konec() -> bool:
     return True
 
 
+class _ZarovnaniMlx:
+    """Analyzátor z MLX v podobě, na kterou se dívá stav_zarovnani().
+
+    Kontrola vadných bloků čte z torchového T3 cestu
+    t3.patched_model.alignment_stream_analyzer a z ní completed_at a alignment.
+    MLX má vlastní analyzátor se stejným stavem, jen jinde - tahle skořápka ho
+    dává na stejné místo, aby hlídání běželo i na MLX. Bez ní by
+    stav_zarovnani() vracelo (None, 0) a posud_zarovnani() by každý blok
+    prohlásilo za bezvadný, tedy by kontrola potichu zmizela.
+    """
+
+    def __init__(self, model):
+        self._model = model
+
+    @property
+    def alignment_stream_analyzer(self):
+        return getattr(self._model, "last_analyzer", None)
+
+
+class _MlxT3:
+    """Zástupce chatterboxového T3, který tokeny počítá v MLX.
+
+    Chatterbox z T3 potřebuje jen `hp` (kvůli speciálním tokenům) a
+    `inference()`. Zbytek původního modulu jsou 2 GB vah, které by na MPS
+    ležely ladem, takže se po záměně pustí.
+    """
+
+    def __init__(self, mlx_model, hp):
+        self._model = mlx_model
+        self.hp = hp
+        # Aby kontrola vadných bloků našla, kam se text dočetl.
+        self.patched_model = _ZarovnaniMlx(mlx_model)
+
+    def inference(self, *, t3_cond, text_tokens, max_new_tokens=1000,
+                  temperature=0.8, cfg_weight=0.5, repetition_penalty=2.0,
+                  min_p=0.05, top_p=1.0, **_ostatni):
+        import mlx.core as mx
+        import torch
+
+        def na_mlx(tenzor):
+            return mx.array(tenzor.detach().cpu().numpy())
+
+        prompt = t3_cond.cond_prompt_speech_tokens
+        tokeny = self._model.inference(
+            speaker_emb=na_mlx(t3_cond.speaker_emb),
+            cond_prompt_speech_tokens=(None if prompt is None
+                                       else na_mlx(prompt).astype(mx.int32)),
+            emotion_adv=na_mlx(t3_cond.emotion_adv),
+            text_tokens=na_mlx(text_tokens).astype(mx.int32),
+            max_new_tokens=int(max_new_tokens or 1000),
+            temperature=float(temperature),
+            top_p=float(top_p),
+            min_p=float(min_p),
+            repetition_penalty=float(repetition_penalty),
+            cfg_weight=float(cfg_weight),
+        )
+        # Chatterbox si z výsledku vezme [0] a pak odstraní speciální tokeny.
+        return torch.tensor([tokeny], dtype=torch.long)
+
+
 class TtsEngine:
     def __init__(self, log_fn):
         self.log = log_fn
@@ -1817,6 +1923,8 @@ class TtsEngine:
         self.nacteny_repo = None
         self.jazyk = None
         self.rychly_dekoder = False
+        self.mlx_presnost = MLX_VYPNUTO   # kvantizace backbonu T3 v MLX
+        self._t3_soubor = None            # checkpoint T3, ze kterého umí načíst i MLX
         self._hlas_klic = None        # pro který referenční hlas jsou podmínky připravené
         self._vychozi_conds = None    # výchozí hlas modelu z conds.pt
 
@@ -1861,19 +1969,24 @@ class TtsEngine:
 
     # ------------------------------------------------------------------
     def nacti_model(self, volba_zarizeni: str = "auto", jazyk_klic: str = "en",
-                    rychly_dekoder: bool = False):
+                    rychly_dekoder: bool = False,
+                    mlx_presnost: str = MLX_VYPNUTO):
         import torch
 
         pozadovane_zarizeni = self.vyber_zarizeni(volba_zarizeni)
         jazyk = jazyk_podle_klice(jazyk_klic)
         pozadovany_repo = jazyk.get("repo") if jazyk.get("zdroj") == "finetune" else None
         rychly_dekoder = bool(rychly_dekoder)
+        if mlx_presnost not in MLX_PRESNOSTI:
+            mlx_presnost = MLX_VYPNUTO
 
         if self.model is not None:
-            # Jiné zařízení, jazykový checkpoint nebo dekodér = čistý start.
-            # Nechat na T3 váhy po předchozím jazyce by bylo horší než nic.
+            # Jiné zařízení, jazykový checkpoint, dekodér nebo přesnost T3 =
+            # čistý start. Nechat na T3 váhy po předchozím jazyce by bylo horší
+            # než nic.
             if (pozadovane_zarizeni != self.zarizeni or self.nacteny_repo != pozadovany_repo
-                    or rychly_dekoder != self.rychly_dekoder):
+                    or rychly_dekoder != self.rychly_dekoder
+                    or mlx_presnost != self.mlx_presnost):
                 self.log(T("log_znovu"))
                 self.uvolni()
             else:
@@ -1882,6 +1995,7 @@ class TtsEngine:
         self.zarizeni = pozadovane_zarizeni
         self.jazyk = jazyk
         self.rychly_dekoder = rychly_dekoder
+        self.mlx_presnost = mlx_presnost
         self.log(T("log_zarizeni", self.zarizeni))
         if self.zarizeni == "cuda":
             try:
@@ -1916,8 +2030,71 @@ class TtsEngine:
         elif jazyk.get("zdroj") == "finetune":
             self.log(T("log_bez_ft", jazyk["nazev"]))
 
+        # Až po fine-tunu: MLX si stejný checkpoint načte sám a torchový T3 se
+        # pak pustí. Musí to být před prvním prepare_conditionals().
+        if mlx_presnost != MLX_VYPNUTO:
+            self._zapni_mlx(mlx_presnost)
+
         if rychly_dekoder:
             self._zapni_rychly_dekoder()
+
+    # ------------------------------------------------------------------
+    def _zakladni_t3(self):
+        """Cesta k základnímu T3 v cache - pro jazyky bez fine-tunu."""
+        try:
+            from chatterbox.mtl_tts import REPO_ID
+            from huggingface_hub import hf_hub_download
+
+            return Path(hf_hub_download(REPO_ID, MLX_ZAKLADNI_T3,
+                                        cache_dir=str(CACHE_DIR / "hub")))
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    def _zapni_mlx(self, presnost: str):
+        """Přesune T3 do MLX. Uživatel si to zapnul, takže selhání je chyba.
+
+        T3 je autoregresivní, takže je to na MPS nejdražší část pipeline.
+        V MLX s 8bitovým backbonem dá 158 tokenů/s proti 27 na torchi
+        a hlavně stabilně: MLX cesta nestaví analyzátor, takže netrpí únavou
+        popsanou v uvolni_hooky_t3(). Po záměně už T3 není úzké hrdlo -
+        z 3,5 s generování na něj padá 1,3 s, zbytek je s3gen na MPS.
+
+        Tiše se vrátit k PyTorchi by znamenalo, že otisk knihy tvrdí něco
+        jiného, než z čeho zvuk opravdu vznikl - stejný důvod, proč se
+        nevrací ani rychlý dekodér.
+        """
+        import gc
+
+        if not mlx_mozny():
+            raise RuntimeError(T("err_mlx", T("err_mlx_platforma")))
+        if self.zarizeni != "mps":
+            raise RuntimeError(T("err_mlx", T("err_mlx_zarizeni", self.zarizeni)))
+
+        try:
+            import mlx.core as mx
+            from mlx_t3 import load_t3
+        except Exception as chyba:
+            raise RuntimeError(T("err_mlx", f"{type(chyba).__name__}: {chyba}")) from chyba
+
+        soubor = self._t3_soubor or self._zakladni_t3()
+        if soubor is None or Path(soubor).suffix != ".safetensors":
+            raise RuntimeError(T("err_mlx", T("err_mlx_checkpoint")))
+
+        try:
+            hp = self.model.t3.hp
+            model_mlx = load_t3(str(soubor), dtype=mx.float32,
+                                bits=MLX_PRESNOSTI[presnost])
+            # Torchový T3 pustit dřív, než si MLX vezme paměť pro svůj.
+            self.model.t3 = None
+            gc.collect()
+            uvolni_pamet_zarizeni(self.zarizeni)
+            self.model.t3 = _MlxT3(model_mlx, hp)
+            mx.set_cache_limit(MLX_STROP_CACHE_MB * 1024 * 1024)
+        except Exception as chyba:
+            raise RuntimeError(T("err_mlx", f"{type(chyba).__name__}: {chyba}")) from chyba
+
+        self.log(T("log_mlx_t3", presnost))
 
     # ------------------------------------------------------------------
     def stahni_rychly_dekoder(self) -> Path:
@@ -2032,6 +2209,8 @@ class TtsEngine:
             return
 
         soubor = kandidati[0]
+        # Odložit i pro MLX - načítá si tentýž checkpoint sám, bez torche.
+        self._t3_soubor = soubor
         self.log(T("log_ft_aplikuji", soubor.name))
 
         try:
@@ -2114,6 +2293,9 @@ class TtsEngine:
         if hasattr(wav, "detach"):
             wav = wav.detach().cpu().numpy()
         wav = np.asarray(wav, dtype="float32").reshape(-1)
+        # Bloky mají různou délku a alokátor si drží tvar toho nejdelšího.
+        # Bez tohoto roste paměť procesu po celou knihu - na MPS nejvíc.
+        uvolni_pamet_zarizeni(self.zarizeni)
         return wav
 
     # ------------------------------------------------------------------
@@ -2152,15 +2334,16 @@ class TtsEngine:
         self.nacteny_repo = None
         self.podporuje_jazyk = True
         self.rychly_dekoder = False
+        self.mlx_presnost = MLX_VYPNUTO
+        self._t3_soubor = None
         self._hlas_klic = None
         self._vychozi_conds = None
         try:
-            import torch, gc
+            import gc
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
         except Exception:
             pass
+        uvolni_pamet_zarizeni()
 
 
 def nastav_seed(seed: int):
@@ -3260,6 +3443,19 @@ class DialogPokrocile(tk.Toplevel):
         ttk.Combobox(ramec, textvariable=app.var_zarizeni, width=7, values=["auto", "cuda", "cpu"],
                      state="disabled" if zamceno else "readonly").grid(row=radek[0], column=1, sticky="w")
         radek[0] += 1
+        # Na Windows ani CUDA se MLX neuplatní, takže se tam volba vůbec nenabízí.
+        if mlx_mozny():
+            popisek(T("lab_mlx"))
+            ttk.Combobox(ramec, textvariable=app.var_mlx_presnost, width=7,
+                         values=list(MLX_VOLBY),
+                         state="disabled" if zamceno else "readonly").grid(
+                row=radek[0], column=1, sticky="w")
+            radek[0] += 1
+            tk.Label(ramec, text=T("hint_mlx"), font=f["popis"], bg=b["panel"],
+                     fg=b["tlumeny"], anchor="w", justify="left",
+                     wraplength=px(420)).grid(row=radek[0], column=0, columnspan=3,
+                                              sticky="w", pady=(px(6), 0))
+            radek[0] += 1
 
         tk.Frame(ramec, height=1, bg=b["linka"]).grid(row=radek[0], column=0, columnspan=3,
                                                        sticky="ew", pady=px(12))
@@ -3569,7 +3765,8 @@ class DialogOprava(tk.Toplevel):
         def prace():
             try:
                 engine = self.app.engine
-                engine.nacti_model(p["zarizeni"], p["jazyk_textu"], p.get("rychly_dekoder", False))
+                engine.nacti_model(p["zarizeni"], p["jazyk_textu"], p.get("rychly_dekoder", False),
+                                   p.get("mlx_presnost", MLX_VYPNUTO))
                 nastav_seed(int(time.time() * 1000) % 999983)
                 vzorky, _vynechano = generuj_blok(engine, text, p, z["blok"], z["blok"],
                                                   self.app.log_z_vlakna)
@@ -3747,6 +3944,7 @@ class Aplikace(tk.Tk):
             "orezat_okraje": bool(self.var_orez.get()),
             "rychly_dekoder": bool(self.var_rychly_dekoder.get()),
             "kontrola_asr": bool(self.var_kontrola_asr.get()),
+            "mlx_presnost": self.var_mlx_presnost.get(),
             "seed": int(self.var_seed.get() or 0),
             "jazyk_textu": self._klic_jazyka_textu(),
             "zarizeni": self.var_zarizeni.get(),
@@ -3828,6 +4026,7 @@ class Aplikace(tk.Tk):
         self.var_orez = tk.BooleanVar(value=c["orezat_okraje"])
         self.var_rychly_dekoder = tk.BooleanVar(value=c["rychly_dekoder"])
         self.var_kontrola_asr = tk.BooleanVar(value=c["kontrola_asr"])
+        self.var_mlx_presnost = tk.StringVar(value=c["mlx_presnost"])
         self.var_seed = tk.IntVar(value=c["seed"])
         self.var_jazyk_textu = tk.StringVar(value=self._nazev_jazyka_textu(c["jazyk_textu"]))
         self.var_zarizeni = tk.StringVar(value=c["zarizeni"])
@@ -3845,7 +4044,8 @@ class Aplikace(tk.Tk):
         for promenna in (self.var_vstup, self.var_ref_wav, self.var_vystup_slozka,
                          self.var_vystup_nazev, self.var_format, self.var_bitrate,
                          self.var_obalka, self.var_lupance, self.var_orez,
-                         self.var_rychly_dekoder, self.var_pauza, self.var_jazyk_textu):
+                         self.var_rychly_dekoder, self.var_mlx_presnost,
+                         self.var_pauza, self.var_jazyk_textu):
             promenna.trace_add("write", lambda *_a: self._po_zmene_nastaveni())
         self.var_vystup_slozka.trace_add("write", lambda *_a: self._odlozene_rozdelane())
 
@@ -5261,7 +5461,8 @@ class Aplikace(tk.Tk):
     def _worker_test(self, veta: str, p: dict):
         vystup = None
         try:
-            self.engine.nacti_model(p["zarizeni"], p["jazyk_textu"], p.get("rychly_dekoder", False))
+            self.engine.nacti_model(p["zarizeni"], p["jazyk_textu"], p.get("rychly_dekoder", False),
+                                    p.get("mlx_presnost", MLX_VYPNUTO))
             nastav_seed(p["seed"])
 
             self.log_z_vlakna(T("log_generuji_uk"))
@@ -5298,6 +5499,7 @@ class Aplikace(tk.Tk):
             "orezat_okraje": bool(self.var_orez.get()),
             "rychly_dekoder": bool(self.var_rychly_dekoder.get()),
             "kontrola_asr": bool(self.var_kontrola_asr.get()),
+            "mlx_presnost": self.var_mlx_presnost.get(),
             "seed": int(self.var_seed.get() or 0),
             "zarizeni": self.var_zarizeni.get(),
             "jazyk_textu": self._klic_jazyka_textu(),
@@ -5363,9 +5565,10 @@ class Aplikace(tk.Tk):
             ("obalka", self.var_obalka, bool),
             ("rychly_dekoder", self.var_rychly_dekoder, bool),
             ("kontrola_asr", self.var_kontrola_asr, bool),
+            ("mlx_presnost", self.var_mlx_presnost, str),
         ]
-        # Kniha uložená dřív, než rychlý dekodér existoval, vznikla bez něj
-        parametry = {"rychly_dekoder": False, **parametry}
+        # Kniha uložená dřív, než rychlý dekodér nebo MLX existovaly, vznikla bez nich
+        parametry = {"rychly_dekoder": False, "mlx_presnost": MLX_VYPNUTO, **parametry}
         zmeneno = []
         for klic, promenna, typ in mapovani:
             if klic not in parametry:
@@ -5552,7 +5755,8 @@ class Aplikace(tk.Tk):
 
             if pool is None:
                 self.log_z_vlakna(T("log_pool_jeden"))
-                self.engine.nacti_model(p["zarizeni"], p["jazyk_textu"], p.get("rychly_dekoder", False))
+                self.engine.nacti_model(p["zarizeni"], p["jazyk_textu"], p.get("rychly_dekoder", False),
+                                        p.get("mlx_presnost", MLX_VYPNUTO))
                 sr = self.engine.sr
             else:
                 sr = pool.sr

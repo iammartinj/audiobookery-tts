@@ -6,6 +6,9 @@
 # vetev chatterboxu uz nema analyzator zarovnani, na kterem stoji kontrola
 # vadnych bloku i oprava predcasneho konce reci - novejsi vydani by je
 # potichu vypnulo.
+# Po zvednuti verze projdi tests/test_chatterbox_api.py: hlida predpoklady,
+# na kterych stoji i cesta pres MLX, a nepotrebuje k tomu Apple Silicon.
+# Co ktery test znamena, je v README v sekci "If you bump chatterbox".
 chatterbox-tts==0.1.7
 
 # Extrakce textu z e-knih
@@ -25,6 +28,13 @@ setuptools>=70,<81
 
 # Prehravani behem prevodu (PortAudio)
 sounddevice>=0.5
+
+# T3 na grafickych jadrech Apple Siliconu. Znacky plati pip pri instalaci,
+# takze na Windows ani Linuxu se tyhle radky vubec neresi - wheely existuji
+# jen pro macOS na arm64. Bez nich aplikace funguje jako dosud, jen volba
+# presnosti T3 nic nezapne.
+mlx>=0.29; sys_platform == "darwin" and platform_machine == "arm64"
+mlx-lm>=0.31; sys_platform == "darwin" and platform_machine == "arm64"
 
 # Generovani obalky audioknihy
 Pillow>=10
