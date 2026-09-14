@@ -395,10 +395,17 @@ znovu s jiným seedem, když:
 - za bodem, kde text došel, následuje víc než 1,6 s, nebo je víc než 0,8 s za
   ním slyšet řeč,
 - model text nedočetl do konce,
-- uvnitř bloku je tiché brblání delší než 3 s.
+- uvnitř bloku je úsek bez řeči delší než 3,5 s — ticho i brblání, protože
+  hučení kolem −34 dBFS je na pauzu moc hlasité a jeho krátké hlasitější
+  záchvěvy se za řeč nepočítají,
+- blok nad 100 znaků se čte pomaleji než 9,5 znaku za sekundu — běžné čtení
+  jede 13,4 a takhle protažený blok skoro vždy vyplňuje brblání.
 
-Když jsou vadné všechny tři pokusy, zůstane ten nejméně poškozený a ocas se
-usekne 0,8 s za koncem textu. Kalibrováno na 58 blocích z nahlášené knihy: ze 41
+Když jsou vadné všechny tři pokusy, záleží na vadě. Ocas za větou jde uříznout,
+takže pokus zůstane a ocas se usekne 0,8 s za koncem textu. Brblání uvnitř
+bloku, pomalé čtení ani nedočtený text vyříznout nejde — blok se proto rozdělí
+na kratší části, ty se vygenerují zvlášť a vloží na stejné místo. Kratší text
+model rozhodí méně. Nejméně poškozený pokus zůstane jen tam, kde už dělit nejde. Kalibrováno na 58 blocích z nahlášené knihy: ze 41
 běžných generování kontrola označila 4 a přepis u každého potvrdil skutečnou
 chybu — chybějící „Ani zdaleka.", useknutou větu, zkomolený začátek a jméno
 opakované ve smyčce. Převod se tím prodlouží zhruba o desetinu.

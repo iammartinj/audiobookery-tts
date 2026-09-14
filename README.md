@@ -236,14 +236,24 @@ block is generated again with a different seed when:
 - more than 1.6 s follows that point, or audible speech continues more than
   0.8 s past it — an added *to siká* after *Prosím*,
 - the text was never read to the end, so words are missing,
-- a quiet stretch inside the block lasts longer than 3 s.
+- a stretch without speech inside the block lasts longer than 3.5 s — silence or
+  murmur alike, since a hum at −34 dBFS is too loud to count as a pause, and its
+  brief louder flickers do not count as speech either,
+- a block over 100 characters reads slower than 9.5 characters per second —
+  ordinary narration runs at 13.4, and a drawn-out block is almost always
+  padded with murmur.
 
-If all three attempts are flawed, the least damaged one is kept, with a tail cut
-0.8 s after the text ended. A block is never dropped because of a tail.
+If all three attempts are flawed, what happens depends on the flaw. A tail can be
+cut cleanly, so that attempt is kept with the tail cut 0.8 s after the text
+ended. Murmur inside the block, slow reading or an unfinished text cannot be cut
+out, so the block is split into shorter parts that are generated separately and
+joined in place — a shorter text throws the model off less often. Only where it
+cannot be split any further is the least damaged attempt kept.
 
 Calibrated on 58 blocks generated from the book the problem was reported in.
 Healthy blocks ran 0–1.48 s past the end of the text, audible speech at most
-0.38 s past it, and their pauses lasted up to 2.2 s. Of 41 ordinary generations
+0.38 s past it, and their longest stretch without speech was 3.0 s, against 3.6
+to 11 s where the model murmured between sentences. Of 41 ordinary generations
 the check flagged 4, and a transcription confirmed a real fault in every one: a
 missing *Ani zdaleka.*, a truncated second sentence, a mangled opening and a name
 repeated in a loop. Expect a conversion about a tenth longer.

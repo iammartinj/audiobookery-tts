@@ -62,6 +62,31 @@ class GenerujBlok(unittest.TestCase):
         self.assertIn("XYZ", vynechano[0])
         self.assertNotIn("Hrdliččin", vynechano[0])
 
+    def test_brblani_ve_vsech_pokusech_blok_rozdeli(self):
+        class Brblajici:
+            """Dlouhý text: v každém pokusu 5 s hučení mezi větami. Krátký: čistý."""
+            sr = SR
+
+            def __init__(self):
+                self.texty = []
+
+            def generuj(self, text, *argumenty):
+                self.texty.append(text)
+                delka = max(1.0, len(text) / 14.0)
+                vzorky = np.full(int(SR * (delka + (5.0 if len(text) > 60 else 0.0))), 0.1, dtype="float32")
+                if len(text) > 60:
+                    vzorky[int(SR * 1.0):int(SR * 6.0)] = 0.02
+                return vzorky
+
+        text = "Byl pozdní večer, první máj. Večerní máj, byl lásky čas. Hrdliččin zval ku lásce hlas."
+        engine = Brblajici()
+        vzorky, vynechano = self.generuj(engine, text)
+        self.assertEqual(vynechano, [])
+        self.assertEqual(engine.texty[:3], [text] * 3)          # tři pokusy o celý blok
+        self.assertTrue(all(len(t) <= 60 for t in engine.texty[3:]))
+        self.assertEqual(" ".join(engine.texty[3:]).split(), text.split())
+        self.assertLess(len(vzorky) / SR, len(text) / 14.0 + 2.0)  # brblání v knize nezůstalo
+
     def test_uplne_selhani_vrati_cely_text(self):
         text = "Krátká věta a nic víc."
         self.assertEqual(self.generuj(FalesnyEngine(zakazane=("a",)), text), (None, [text]))

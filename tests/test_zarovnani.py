@@ -68,6 +68,25 @@ class Rozbor(unittest.TestCase):
         self.assertAlmostEqual(konec / SR, 6.0, delta=0.05)
         self.assertAlmostEqual(ticho, 2.5, delta=0.06)
 
+    def test_hučení_mezi_vetami_se_pocita(self):
+        # Blok 23 Ovidia: mezi větami hučení kolem -34 dBFS, na ticho moc hlasité
+        vzorky = rec(10.0, 3.0, 4.0)
+        vzorky[int(SR * 3.0):int(SR * 7.0)] = 0.02
+        self.assertAlmostEqual(ab.rozbor_reci(vzorky, SR)[1], 4.0, delta=0.06)
+
+    def test_kratke_zachvevy_hucení_usek_nerozdeli(self):
+        # Blok 64 Ovidia: v hučení záchvěvy nad třetinou hlasitosti řeči, dlouhé 60 ms
+        vzorky = rec(12.0, 3.0, 6.0)
+        vzorky[int(SR * 3.0):int(SR * 9.0)] = 0.02
+        for zacatek in (4.0, 5.5, 7.0):
+            vzorky[int(SR * zacatek):int(SR * (zacatek + 0.06))] = 0.045
+        self.assertAlmostEqual(ab.rozbor_reci(vzorky, SR)[1], 6.0, delta=0.1)
+
+    def test_kratke_slovo_v_reci_se_pocita_jako_rec(self):
+        vzorky = rec(8.0, 2.0, 3.0)
+        vzorky[int(SR * 3.5):int(SR * 3.8)] = 0.1        # 0,3 s slabika uprostřed pauzy
+        self.assertLess(ab.rozbor_reci(vzorky, SR)[1], 2.0)
+
     def test_ticho_na_okrajich_se_nepocita(self):
         vzorky = np.concatenate([np.zeros(SR * 3, dtype="float32"), rec(2.0), np.zeros(SR * 3, dtype="float32")])
         self.assertEqual(ab.rozbor_reci(vzorky, SR)[1], 0.0)
@@ -81,8 +100,10 @@ class FalesnyEngine:
         self.vysledky = list(vysledky)
         self.model = None
         self.pokusu = 0
+        self.texty = []
 
     def generuj(self, text, *argumenty):
+        self.texty.append(text)
         vzorky, dosel, snimku = self.vysledky[self.pokusu]
         if not isinstance(vzorky, np.ndarray):
             vzorky = rec(vzorky)
@@ -101,7 +122,7 @@ class GenerujJednou(unittest.TestCase):
         self.hlasky = []
 
     def generuj(self, engine, p=P):
-        return ab._generuj_jednou(engine, "Byl pozdní večer, první máj.", p, 1, 1, self.hlasky.append)
+        return ab._generuj_jednou(engine, "Byl pozdní večer, první máj.", p, 1, 1, self.hlasky.append)[0]
 
     def test_cisty_pokus_se_vezme_hned(self):
         engine = FalesnyEngine([(4.0, 90, 100)])
@@ -140,6 +161,38 @@ class GenerujJednou(unittest.TestCase):
             vzorky = self.generuj(engine, {**P, "kontrola_asr": True})
         self.assertEqual(len(vzorky), 10 * SR)
 
+    def test_brblani_se_posuzuje_az_po_uprave(self):
+        # Surový pokus je čistý, brblání se ukáže až ve zvuku po ořezu okrajů
+        engine = FalesnyEngine([(8.0, 190, 200), (7.0, 170, 175)])
+        upraveny = rec(12.0, 3.0, 5.0)
+        vystupy = iter([(upraveny, 0.7), (rec(7.0), 0.0)])
+        with mock.patch.object(ab, "orizni_okraje", lambda v, sr, zapnuto=True: next(vystupy)):
+            vzorky = self.generuj(engine)
+        self.assertEqual(engine.pokusu, 2)
+        self.assertEqual(len(vzorky), 7 * SR)
+
+    def test_tri_pokusy_s_brblanim_vrati_posledni(self):
+        # Dřív tu výběr nejlepšího pokusu spadl na chybějícím klíči "ticho"
+        engine = FalesnyEngine([(rec(12.0, 3.0, 5.0), 290, 300)] * 3)
+        vzorky = self.generuj(engine)
+        self.assertEqual(engine.pokusu, 3)
+        self.assertEqual(len(vzorky), 12 * SR)
+
+    def test_pomale_cteni_se_zkusi_znovu(self):
+        text = "Za normálních okolností, nebo alespoň kdybych byl úplně střízlivý, bych nikdy takovou " \
+               "chybu neudělal. Možná nemám zájem o literaturu, ovšem tak velký ignorant zas nejsem."
+        # 172 znaků za 22 s = 7,8 znaku za sekundu, zarovnání i pauzy v pořádku
+        engine = FalesnyEngine([(22.0, 540, 550), (13.0, 315, 325)])
+        vzorky, vada = ab._generuj_jednou(engine, text, P, 1, 1, self.hlasky.append)
+        self.assertEqual(vada, "")
+        self.assertEqual(engine.pokusu, 2)
+        self.assertEqual(len(vzorky), 13 * SR)
+
+    def test_kratky_blok_rychlost_nehlida(self):
+        engine = FalesnyEngine([(6.0, 140, 150)])            # 28 znaků za 6 s
+        self.generuj(engine)
+        self.assertEqual(engine.pokusu, 1)
+
     def test_bez_analyzatoru_hlida_delku(self):
         class BezAnalyzatoru:
             sr = SR
@@ -153,6 +206,20 @@ class GenerujJednou(unittest.TestCase):
         vzorky = self.generuj(engine)
         self.assertEqual(engine.pokusu, 2)
         self.assertEqual(len(vzorky), 2 * SR)
+
+
+class TextProModel(unittest.TestCase):
+    def test_trojtecka_na_konci_je_tecka(self):
+        self.assertEqual(ab.text_pro_model("Za třetí..."), "Za třetí.")
+        self.assertEqual(ab.text_pro_model('Řekl: "Za třetí..." '), 'Řekl: "Za třetí."')
+
+    def test_trojtecka_uprostred_zustane(self):
+        self.assertEqual(ab.text_pro_model("Nevím... asi ne."), "Nevím... asi ne.")
+
+    def test_model_dostane_upraveny_text(self):
+        engine = FalesnyEngine([(4.0, 90, 100)])
+        ab._generuj_jednou(engine, "Za třetí...", P, 1, 1, lambda z: None)
+        self.assertEqual(engine.texty, ["Za třetí."])
 
 
 class Shoda(unittest.TestCase):

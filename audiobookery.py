@@ -2373,15 +2373,29 @@ REZERVA_ZA_KONCEM_S = 0.8
 # Slyšitelná řeč tak dlouho po bodu, kde text došel, je přídavek navíc
 # ("Prosím, to siká"). U zdravých bloků nejvýš 0,38 s, u vadných 1,6 a 1,9 s.
 MAX_RECI_ZA_KONCEM_S = 0.8
-# Tiché brblání uvnitř bloku. Přirozené pauzy trvaly až 2,2 s (dočtené bloky
-# se shodou přepisu 0,98), brblání 3,3 a 5,6 s - to se jinak ničím neprozradí.
-MAX_TICHO_UVNITR_S = 3.0
+# Brblání uvnitř bloku - model mezi dvěma větami hučí a šumí místo pauzy.
+# Měří se nejdelší úsek bez řeči, ne nejdelší ticho: hučení kolem -34 dBFS
+# je na ticho moc hlasité. Řeč, která úsek přeruší, musí být nad polovinou
+# hlasitosti řeči souvisle aspoň 0,15 s - hučení má krátké hlasitější
+# záchvěvy a ty ho jinak rozsekaly pod práh (blok 64 Ovidia: 3,48 s místo
+# 9,8 s). Naměřeno na dvou převodech kapitoly 1 Ovidia, uživatel poslechem
+# potvrdil všech 11 nalezených míst: brblání 3,9 až 9,8 s, zbylé bloky
+# nejvýš 3,1 s.
+MAX_BEZ_RECI_S = 3.5
+PRAH_RECI = 0.50
+MIN_RECI_S = 0.15
+# Záloha: blok nad 100 znaků, který se čte pomaleji, je skoro jistě protažený
+# brbláním. Běžně 13,4 znaku za sekundu, 10 % nejpomalejších zdravých pod
+# 11,5; vadné bloky 6,6 až 9,4.
+MIN_ZNAKU_ZA_S = 9.5
 
 
 def rozbor_reci(vzorky, sr: int):
-    """Vrátí (kde končí slyšitelná řeč ve vzorcích, nejdelší tichý úsek uvnitř v s).
+    """Vrátí (kde končí slyšitelná řeč ve vzorcích, nejdelší úsek bez řeči uvnitř v s).
 
-    Řeč je rámec nad 35 % hlasitosti 90. percentilu, ticho pod 10 %.
+    Slyšitelná řeč je rámec nad 35 % hlasitosti 90. percentilu. Úsek bez
+    řeči je všechno mezi první a poslední řečí, co není souvislou řečí nad
+    PRAH_RECI delší než MIN_RECI_S - ticho, hučení i jeho krátké záchvěvy.
     """
     import numpy as np
 
@@ -2398,8 +2412,12 @@ def rozbor_reci(vzorky, sr: int):
     rec = np.flatnonzero(rms > uroven * 0.35)
     if not len(rec):
         return 0, 0.0
-    tiche = (rms[rec[0]:rec[-1] + 1] < uroven * 0.10).astype("int8")
-    zmeny = np.diff(np.concatenate(([0], tiche, [0])))
+    souvisla = (rms[rec[0]:rec[-1] + 1] > uroven * PRAH_RECI).astype("int8")
+    zmeny = np.diff(np.concatenate(([0], souvisla, [0])))
+    for a, b in zip(np.flatnonzero(zmeny == 1), np.flatnonzero(zmeny == -1)):
+        if (b - a) * krok / sr < MIN_RECI_S:
+            souvisla[a:b] = 0            # záchvěv hučení, ne slabika
+    zmeny = np.diff(np.concatenate(([0], 1 - souvisla, [0])))
     delky = np.flatnonzero(zmeny == -1) - np.flatnonzero(zmeny == 1)
     nejdelsi = float(delky.max()) * krok / sr if len(delky) else 0.0
     return int(zacatky[rec[-1]] + okno), nejdelsi
@@ -2499,8 +2517,20 @@ def shoda_textu(ocekavany: str, prepsany: str) -> float:
                                    autojunk=False).ratio()
 
 
+RE_TROJTECKA_NA_KONCI = re.compile(r"\.{2,}(?=[\"')\]]*$)")
+
+
+def text_pro_model(text: str) -> str:
+    """Trojtečku na konci bloku převede na tečku.
+
+    Chatterbox trojtečku mění na čárku a čárku bere jako konec věty. Blok
+    "Za třetí..." tak dostane jako otevřenou větu a model pak nepřestane.
+    """
+    return RE_TROJTECKA_NA_KONCI.sub(".", text.rstrip())
+
+
 def _generuj_jednou(engine, text: str, p: dict, index: int, celkem: int, log):
-    """Až tři pokusy o jeden kus textu. Vrátí vzorky, nebo None.
+    """Až tři pokusy o jeden kus textu. Vrátí (vzorky nebo None, vada vybraného pokusu).
 
     Čistý pokus se vezme hned. Když kontrola zarovnání najde vadu, zkusí se
     to znovu s jiným seedem. Když jsou vadné všechny tři, vezme se ten
@@ -2522,7 +2552,7 @@ def _generuj_jednou(engine, text: str, p: dict, index: int, celkem: int, log):
         try:
             if pokus > 1:
                 nastav_seed(int(time.time() * 1000) % 999983)
-            vzorky = engine.generuj(text, p["referencni_wav"], p["exaggeration"],
+            vzorky = engine.generuj(text_pro_model(text), p["referencni_wav"], p["exaggeration"],
                                     p["cfg_weight"], p["temperature"],
                                     p.get("min_p", 0.05))
             delka = len(vzorky) / float(engine.sr)
@@ -2531,22 +2561,18 @@ def _generuj_jednou(engine, text: str, p: dict, index: int, celkem: int, log):
                 continue
 
             dosel, snimku = stav_zarovnani(engine)
-            konec_reci, ticho = rozbor_reci(vzorky, engine.sr)
+            konec_reci, _ = rozbor_reci(vzorky, engine.sr)
             if snimku:
                 vada, ponechat = posud_zarovnani(dosel, snimku, len(vzorky), konec_reci)
             else:
                 # Bez analyzátoru zbývá odhad z délky: čte se 13,5 znaku za sekundu
                 vada = "dlouhy" if delka > len(text) / 10.0 + 3.0 else ""
                 ponechat = len(vzorky)
-            if not vada and ticho > MAX_TICHO_UVNITR_S:
-                vada = "ticho"
             if vada == "ocas":
                 log(T("log_ocas", index, celkem, (len(vzorky) - ponechat) / float(engine.sr)))
                 vzorky = vzorky[:ponechat]
             elif vada == "nedocteno":
                 log(T("log_nedocteno", index, celkem))
-            elif vada == "ticho":
-                log(T("log_ticho", index, celkem, ticho))
             elif vada == "dlouhy":
                 log(T("log_dlouhy", index, celkem, delka, len(text)))
 
@@ -2559,8 +2585,21 @@ def _generuj_jednou(engine, text: str, p: dict, index: int, celkem: int, log):
             if ztlumeno:
                 log(T("log_lupance", ztlumeno, index, celkem))
 
+            # Brblání a rychlost se posuzují až na tom, co se opravdu zapíše.
+            # Ořez okrajů mění hlasitostní rozložení bloku - blok 65 Ovidia
+            # prošel před ořezem pod prahem a v hotové kapitole měl 4,6 s.
             if not vada:
-                return vzorky
+                _, ticho = rozbor_reci(vzorky, engine.sr)
+                rychlost = len(text) / max(len(vzorky) / float(engine.sr), 1e-3)
+                if ticho > MAX_BEZ_RECI_S:
+                    vada = "ticho"
+                    log(T("log_ticho", index, celkem, ticho))
+                elif len(text) >= 100 and rychlost < MIN_ZNAKU_ZA_S:
+                    vada = "pomaly"
+                    log(T("log_pomaly", index, celkem, rychlost))
+
+            if not vada:
+                return vzorky, ""
             kandidati.append((vzorky, vada))
         except Exception as chyba:
             log(T("log_pokus", index, celkem, pokus, chyba))
@@ -2573,35 +2612,46 @@ def _generuj_jednou(engine, text: str, p: dict, index: int, celkem: int, log):
             time.sleep(0.5)
 
     if not kandidati:
-        return None
+        return None, ""
     if kontrola and len(kandidati) > 1:
         body = [skore(v) for v, _ in kandidati]
         nejlepsi = max(range(len(kandidati)), key=lambda i: body[i])
         log(T("log_asr_vyber", index, celkem, nejlepsi + 1, len(kandidati), body[nejlepsi]))
-        return kandidati[nejlepsi][0]
+        return kandidati[nejlepsi]
     # Bez přepisu: čistý pokus, jinak uříznutý ocas, jinak poslední
-    poradi = {"": 0, "ocas": 1, "dlouhy": 2, "nedocteno": 3}
-    return min(reversed(kandidati), key=lambda k: poradi[k[1]])[0]
+    poradi = {"": 0, "ocas": 1, "ticho": 2, "pomaly": 2, "dlouhy": 2, "nedocteno": 3}
+    return min(reversed(kandidati), key=lambda k: poradi[k[1]])
+
+
+# Vady, které po uříznutí nezmizí - s takovým pokusem se blok raději rozdělí
+VADY_K_DELENI = ("ticho", "pomaly", "dlouhy", "nedocteno")
 
 
 def generuj_blok(engine, blok: str, p: dict, index: int, celkem: int, log, _hloubka: int = 0):
     """Vygeneruje blok. Vrací (vzorky nebo None, vynechané úseky textu).
 
     Když blok nevyjde ani na tři pokusy, rozdělí se na kratší části a zkusí se
-    po nich - kratší text model rozhodí méně. Zpátky do knihy se to vloží na
-    stejné místo, takže pořadí sedí. Vynechá se jen to, co nevyjde ani po
-    rozdělení, a to se vrátí, ať se to dá uživateli ukázat.
+    po nich - kratší text model rozhodí méně. Platí to i pro pokusy, které
+    sice zvuk daly, ale všechny s brbláním nebo nedočteným textem: dřív si
+    aplikace nechala ten nejméně vadný a brblání v knize zůstalo (blok 39
+    Ovidia se 7,3 s). Uříznutý ocas za větou se nechává, ten je opravený.
+
+    Zpátky do knihy se části vloží na stejné místo, takže pořadí sedí.
+    Vynechá se jen to, co nevyjde ani po rozdělení, a to se vrátí, ať se to
+    dá uživateli ukázat. Kde už dělit nejde, zůstane nejméně vadný pokus.
 
     Používají to obě cesty - jednoprocesová i jednotlivý pracovník poolu.
     """
     import numpy as np
 
-    vzorky = _generuj_jednou(engine, blok, p, index, celkem, log)
-    if vzorky is not None:
+    vzorky, vada = _generuj_jednou(engine, blok, p, index, celkem, log)
+    if vzorky is not None and vada not in VADY_K_DELENI:
         return vzorky, []
 
     casti = rozdel_na_bloky(blok, max(MIN_CAST_ZNAKU, len(blok) // 2)) if _hloubka < 2 else []
     if len(casti) < 2:
+        if vzorky is not None:
+            return vzorky, []
         log(T("log_preskocen", index, celkem, blok[:60]))
         return None, [blok]
 
