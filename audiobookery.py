@@ -57,7 +57,7 @@ APP_NAME = "Audiobookery"
 
 # Znaky, které Windows v názvu souboru nedovolí
 ZAKAZANE_ZNAKY = r'[<>:"/\|?*]'
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 
 VYSLOVNOST_PATH = APP_DIR / "vyslovnost.json"
 
@@ -908,6 +908,30 @@ def rozdel_na_bloky(text: str, max_znaku: int = 200) -> list:
     return bloky
 
 
+def priprav_bloky(kapitoly, jazyk: str, max_znaku: int):
+    """Kapitoly -> (kapitoly s prvním blokem, bloky, bloky před slovníčkem, ručních náhrad, z Wikislovníku).
+
+    Text se dělí na bloky ještě před slovníčkem výslovnosti a ten se použije
+    až na hotové bloky. Hranice bloků i délky v otisku tak na slovníčku
+    nezávisí: pravidlo "dacan" -> "datsan" prodloužilo slovo o znak
+    a rozdělaného Ovidia už nešlo navázat.
+    """
+    info, bloky, puvodni = [], [], []
+    nahrazeno = z_wiki = 0
+    for kap in kapitoly:
+        casti = rozdel_na_bloky(normalizuj_text(kap["text"]), max_znaku)
+        if not casti:
+            continue
+        info.append({"nazev": kap.get("nazev") or "", "prvni_blok": len(bloky)})
+        for cast in casti:
+            text, kolik, kolik_wiki = uprav_vyslovnost(cast, jazyk)
+            nahrazeno += kolik
+            z_wiki += kolik_wiki
+            bloky.append((len(info) - 1, text))
+            puvodni.append(cast)
+    return info, bloky, puvodni, nahrazeno, z_wiki
+
+
 # ==========================================================================
 #  Práce se zvukem (WAV zápis, ffmpeg)
 # ==========================================================================
@@ -1027,9 +1051,9 @@ def otisk_hlasu(cesta_knihy: Path, p: dict, bloky) -> str:
     """Otisk zdroje, nastavení hlasu a rozdělení textu na bloky.
 
     Délky bloků jsou v otisku, aby navázání nikdy nesedlo na posunuté hranice -
-    kus textu by se jinak přeskočil nebo zopakoval. Háček ze slovníčku délku
-    slova nemění, takže opravy výslovnosti navázání nezablokují. Ruční
-    pravidlo, které slovo prodlouží, ano.
+    kus textu by se jinak přeskočil nebo zopakoval. Bloky se sem dávají
+    v podobě před slovníčkem výslovnosti (priprav_bloky), takže změna
+    slovníčku navázání nezablokuje, ani když pravidlo slovo prodlouží.
     """
     import hashlib
 
@@ -1081,16 +1105,19 @@ def otisk_verze_1(cesta_knihy: Path, p: dict, celkem_bloku: int) -> str:
 def posud_navazani(data: dict, zadani: dict):
     """Jde na uložený postup navázat? Vrací (jde, změněná nastavení).
 
-    'zadani' nese otisk_hlasu, otisk_verze_1, opravy a ulozitelne parametry.
-    Když navázat jde, seznam obsahuje opravy změněné od přerušení. Když ne,
-    obsahuje změněná nastavení hlasu - prázdný seznam pak znamená, že se
-    změnil text knihy, jeho rozdělení na bloky nebo soubor s nahrávkou hlasu.
+    'zadani' nese otisk_hlasu, otisk_verze_1, opravy a ulozitelne parametry,
+    volitelně i otisk_po_slovnicku - otisk z bloků po slovníčku výslovnosti,
+    jak ho ukládaly dřívější verze. Když navázat jde, seznam obsahuje opravy
+    změněné od přerušení. Když ne, obsahuje změněná nastavení hlasu - prázdný
+    seznam pak znamená, že se změnil text knihy, jeho rozdělení na bloky nebo
+    soubor s nahrávkou hlasu.
     """
     if not data:
         return False, []
     verze = data.get("verze")
     if verze == 2:
-        jde = data.get("otisk_hlasu") == zadani["otisk_hlasu"]
+        ulozeny = data.get("otisk_hlasu")
+        jde = bool(ulozeny) and ulozeny in (zadani["otisk_hlasu"], zadani.get("otisk_po_slovnicku"))
     elif verze == 1:
         jde = data.get("otisk") == zadani["otisk_verze_1"]
     else:
@@ -3863,6 +3890,7 @@ class Aplikace(tk.Tk):
         self.engine = TtsEngine(self.log_z_vlakna)
 
         self.bloky = []          # (index_kapitoly, text_bloku)
+        self.bloky_puvodni = []  # texty bloků před slovníčkem výslovnosti - do otisku
         self.kapitoly = []
         self.ma_kapitoly = False
         self.nazev_knihy = ""
@@ -5389,22 +5417,8 @@ class Aplikace(tk.Tk):
 
             # Každý blok si nese index kapitoly, ze které pochází - podle toho
             # se pak výstup rozpadne na soubory.
-            self.kapitoly = []
-            self.bloky = []
-            nahrazeno = z_wiki = 0
-            jazyk = self._kod_jazyka_textu()
-            for i, kap in enumerate(kapitoly):
-                text = normalizuj_text(kap["text"])
-                text, kolik, kolik_wiki = uprav_vyslovnost(text, jazyk)
-                nahrazeno += kolik
-                z_wiki += kolik_wiki
-                if not text.strip():
-                    continue
-                bloky = rozdel_na_bloky(text, max_znaku)
-                if not bloky:
-                    continue
-                self.kapitoly.append({"nazev": kap.get("nazev") or "", "prvni_blok": len(self.bloky)})
-                self.bloky.extend((len(self.kapitoly) - 1, b) for b in bloky)
+            self.kapitoly, self.bloky, self.bloky_puvodni, nahrazeno, z_wiki = priprav_bloky(
+                kapitoly, self._kod_jazyka_textu(), max_znaku)
 
             if not self.bloky:
                 raise ValueError("Text se nepodařilo rozdělit na bloky.")
@@ -5429,6 +5443,7 @@ class Aplikace(tk.Tk):
             self.log(T("log_ukazka_bloku", self.bloky[0][1][:120]))
         except Exception as chyba:
             self.bloky = []
+            self.bloky_puvodni = []
             self.kapitoly = []
             self.ma_kapitoly = False
             self.var_soubor_info.set(T("info_nezdarilo"))
@@ -5617,13 +5632,16 @@ class Aplikace(tk.Tk):
         cesta_knihy = Path(self.var_vstup.get().strip('" '))
         texty = [b for _, b in self.bloky]
         kod = (parametry.get("jazyk_textu") or "").split("|")[0]
-        parametry["otisk_hlasu"] = otisk_hlasu(cesta_knihy, parametry, texty)
+        parametry["otisk_hlasu"] = otisk_hlasu(cesta_knihy, parametry, self.bloky_puvodni)
+        # Knihy rozdělané dřív mají otisk z bloků až po slovníčku výslovnosti
+        parametry["otisk_po_slovnicku"] = otisk_hlasu(cesta_knihy, parametry, texty)
         parametry["otisk_verze_1"] = otisk_verze_1(cesta_knihy, parametry, len(texty))
         parametry["opravy"] = {**{k: parametry.get(k) for k in NASTAVENI_OPRAV},
                                "slovnik": otisk_vyslovnosti(kod)}
         parametry["zdroj"] = self.var_vstup.get().strip('" ')
         parametry["ulozitelne"] = {k: v for k, v in parametry.items()
-                                   if k not in ("otisk_hlasu", "otisk_verze_1", "opravy", "ulozitelne")}
+                                   if k not in ("otisk_hlasu", "otisk_po_slovnicku", "otisk_verze_1",
+                                                "opravy", "ulozitelne")}
         parametry["ulozitelne"]["max_znaku"] = int(self.var_max_znaku.get())
 
         # --- navázat na přerušený běh? ---

@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import audiobookery as ab  # noqa: E402
@@ -55,6 +56,32 @@ class OtiskHlasu(unittest.TestCase):
         self.assertEqual(ab.otisk_verze_1(self.kniha, ZAKLAD, 2), ab.otisk_verze_1(self.kniha, bez, 2))
 
 
+class PripravBloky(unittest.TestCase):
+    # "Rozmazlený dacan." + mezera + "Ano." má přesně 22 znaků
+    KAPITOLY = [{"nazev": "1", "text": "Rozmazlený dacan. Ano."}, {"nazev": "2", "text": "Tichý večer."}]
+
+    def priprav(self, pravidla):
+        vzor, mapa = ab._sestav_vzor(pravidla)
+        with mock.patch.multiple(ab, VZOR_VYSLOVNOSTI=vzor, MAPA_VYSLOVNOSTI=mapa):
+            return ab.priprav_bloky(self.KAPITOLY, "", 22)
+
+    def test_delsi_slovo_hranice_bloku_neposune(self):
+        bez = self.priprav({})
+        s = self.priprav({"dacan*": "datsan*"})
+        self.assertEqual(s[1], [(0, "Rozmazlený datsan. Ano."), (1, "Tichý večer.")])
+        self.assertEqual(s[2], bez[2])
+        self.assertEqual(s[0], bez[0])
+        self.assertEqual(s[3], 1)
+
+    def test_otisk_se_slovnickem_nemeni(self):
+        with tempfile.TemporaryDirectory() as slozka:
+            kniha = Path(slozka) / "kniha.txt"
+            kniha.write_text("x", encoding="utf-8")
+            bez = ab.otisk_hlasu(kniha, ZAKLAD, self.priprav({})[2])
+            s = ab.otisk_hlasu(kniha, ZAKLAD, self.priprav({"dacan*": "datsan*"})[2])
+        self.assertEqual(s, bez)
+
+
 class PosudNavazani(unittest.TestCase):
     OPRAVY = {"odstranit_lupance": True, "orezat_okraje": True, "rychly_dekoder": False, "slovnik": "S"}
 
@@ -84,6 +111,15 @@ class PosudNavazani(unittest.TestCase):
     def test_neznamy_duvod(self):
         # Otisk nesedí, nastavení ano - změnil se text, bloky nebo soubor s hlasem
         self.assertEqual(ab.posud_navazani(self.stav(), self.zadani(otisk="H2")), (False, []))
+
+    def test_otisk_po_slovnicku_z_drivejska(self):
+        # Knihy rozdělané dřív mají otisk z bloků až po slovníčku výslovnosti
+        zadani = {**self.zadani(otisk="H2"), "otisk_po_slovnicku": "H"}
+        self.assertEqual(ab.posud_navazani(self.stav(), zadani), (True, []))
+
+    def test_chybejici_otisk_nesedi(self):
+        zadani = {**self.zadani(), "otisk_po_slovnicku": None}
+        self.assertFalse(ab.posud_navazani({**self.stav(), "otisk_hlasu": None}, zadani)[0])
 
     def test_prazdny_stav(self):
         self.assertEqual(ab.posud_navazani({}, self.zadani()), (False, []))

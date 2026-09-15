@@ -453,9 +453,10 @@ tichá, tiché, tichého, tichem* without listing every case.
 all read hard — trading an occasional error for a systematic one. Add only the
 words you actually hear going wrong.
 
-Both dictionaries are part of the resume fingerprint — the Czech one below only
-for Czech books — so changing either stops a half-finished book from continuing
-with a different pronunciation.
+Changing either dictionary does not stop a half-finished book from continuing.
+The book is split into blocks before the dictionaries are applied, so block
+boundaries stay where they were even when a rule makes a word longer. The change
+is noted in the log, and the rest of the book is read with the new pronunciation.
 
 ### A Czech dictionary from Wiktionary
 
@@ -553,8 +554,8 @@ the book would not match the first, or a shifted block boundary would repeat or
 skip a piece of text. Corrections do not block it: the click filter, edge
 trimming, the fast decoder and the pronunciation dictionaries only make the rest
 of the book better, so a changed correction is noted in the log and the
-conversion carries on. A háček from the Czech dictionary does not change the
-length of a word, so it never moves a block boundary.
+conversion carries on. The dictionaries are applied only after the book is split
+into blocks, so not even a rule that makes a word longer moves a block boundary.
 
 If resuming is not possible, Audiobookery says what changed and asks before
 starting over — nothing is deleted without that answer. Starting a book whose
