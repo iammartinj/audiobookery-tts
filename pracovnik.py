@@ -25,7 +25,8 @@ def bezet(ukoly, vysledky, nastaveni):
     try:
         engine = ab.TtsEngine(log)
         engine.nacti_model(nastaveni["zarizeni"], nastaveni["jazyk_textu"],
-                           nastaveni.get("rychly_dekoder", False))
+                           nastaveni.get("rychly_dekoder", False),
+                           nastaveni.get("mlx_presnost", ab.MLX_VYPNUTO))
         vysledky.put(("pripraven", id_p, engine.sr))
 
         while True:

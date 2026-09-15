@@ -72,6 +72,13 @@ TEXTY = {
     "lab_orez":         ("trim block edges", "oříznout okraje bloku"),
     "lab_lupance":      ("remove clicks", "odstranit lupance"),
     "lab_rychly_dekoder": ("fast decoder", "rychlý dekodér"),
+    "lab_mlx":          ("T3 precision (MLX)", "přesnost T3 (MLX)"),
+    "hint_mlx":         ("Runs T3 on the GPU cores through MLX - Apple Silicon only. "
+                         "8-bit gives 158 tok/s against 27 on mps and is near-lossless; "
+                         "4-bit saves memory but is no faster.",
+                         "Pustí T3 přes MLX na grafických jádrech - jen na Apple Siliconu. "
+                         "8 bitů dá 158 tok/s proti 27 na mps a je v podstatě bez ztráty; "
+                         "4 bity ušetří paměť, ale rychlejší nejsou."),
     "dlg_oprava":       ("Fix a passage", "Oprava úseku"),
     "oprava_popis":     ("Find the spot by its time, generate the block again and swap it into the file. "
                          "The text can be edited before generating - it is read exactly as written.",
@@ -311,6 +318,16 @@ TEXTY = {
                          "Turn it off in advanced settings or try again.",
                          "Rychlý dekodér se nepodařilo načíst ({0}). "
                          "Vypněte ho v pokročilém nastavení, nebo to zkuste znovu."),
+    "log_mlx_t3":       ("T3 running on the GPU cores through MLX, {0} backbone.",
+                         "T3 běží přes MLX na grafických jádrech, backbone {0}."),
+    "err_mlx":          ("T3 on MLX could not be started ({0}). "
+                         "Set the T3 precision back to 'off' in advanced settings.",
+                         "T3 na MLX se nepodařilo spustit ({0}). "
+                         "Vraťte přesnost T3 v pokročilém nastavení na 'off'."),
+    "err_mlx_platforma": ("MLX needs Apple Silicon", "MLX potřebuje Apple Silicon"),
+    "err_mlx_zarizeni": ("the device is {0}, not mps", "zařízení je {0}, ne mps"),
+    "err_mlx_checkpoint": ("the T3 checkpoint is not a safetensors file",
+                           "checkpoint T3 není safetensors"),
     "log_lupance":      ("Block {1}/{2}: {0} click(s) removed from pauses.",
                          "Blok {1}/{2}: {0} lupanec/ů odstraněno z pauz."),
     "log_obalka":       ("Cover generated: {0}", "Obálka vygenerována: {0}"),

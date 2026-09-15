@@ -170,6 +170,7 @@ nahrávky — bývá tam znělka nebo ohlášení titulu jiným hlasem.
 | Zařízení | auto | `auto` zvolí CUDA, pokud je dostupná. |
 | Rychlý dekodér | vypnuto | Destilovaný dekodér z Chatterbox Turbo. Na 2080 Ti převod zrychlí zhruba o 11 %, zvuk zůstává obdobný. Při prvním zapnutí stáhne 1,1 GB. |
 | Kontrola přepisem | vypnuto | U bloku, kde selžou všechny tři pokusy, vybere přes Whisper ten nejbližší textu. Při prvním zapnutí stáhne 1,6 GB. |
+| Přesnost T3 (MLX) | off | Jen na Apple Siliconu, jinde se volba nenabízí. Pustí T3 přes MLX na grafických jádrech: na M4 dá 8bitový backbone 158 tok/s proti 27 až 22 na PyTorchi, a narozdíl od něj rychlost neklesá. 8 bitů jsou od float32 v podstatě bezeztrátové (KL 8e-5) a stejně rychlé jako 4 bity; 4 bity tedy jen šetří paměť za cenu kvality. |
 
 ## Jazyk knihy a katalog modelů
 

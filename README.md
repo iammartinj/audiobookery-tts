@@ -31,7 +31,7 @@ no cloud service, no account, and no per-character billing. Built on
 | | |
 |---|---|
 | OS | Windows 10/11 (the launcher is a `.bat`; the Python code itself is portable) |
-| GPU | NVIDIA with ~4 GB free VRAM. CPU works but is far slower |
+| GPU | NVIDIA with ~4 GB free VRAM. CPU works but is far slower. On Apple Silicon T3 can run [on the GPU cores](#t3-on-the-gpu-cores-apple-silicon) |
 | Python | 3.10+ — [uv](https://docs.astral.sh/uv/) is used if present, otherwise `venv` |
 | Disk | ~8 GB — 3 GB base model, 2.5 GB PyTorch, 2.1 GB per language checkpoint |
 | Optional | `ffmpeg` on PATH for MP3 export |
@@ -177,6 +177,80 @@ two decoders sounded alike.
 
 Switching it on changes the fingerprint of an unfinished book, so a conversion
 continues only with the setting it was started with.
+
+### T3 on the GPU cores (Apple Silicon)
+
+The fast decoder helps least exactly where most of the time goes: T3, which
+produces the speech tokens one at a time. On an Apple Silicon Mac that stage
+can run in [MLX](https://github.com/ml-explore/mlx) instead of PyTorch, on the
+GPU cores. It is **off by default** — pick a precision under *advanced
+settings*, where the option appears only on Apple Silicon.
+
+Measured on an M4, 96 text tokens and about 200 speech tokens per generation,
+20 runs each:
+
+| T3 precision | tokens/s | T3 parameters |
+|---|---|---|
+| PyTorch on `mps` | 27 → 22, decaying | 2.14 GB |
+| MLX float32 | 58, flat | 2.14 GB |
+| **MLX 8-bit** | **158, flat** | **0.70 GB** |
+| MLX 4-bit | 158, flat | 0.45 GB |
+
+The PyTorch figure decays across runs for the reason described under
+[long books no longer slow down](#long-books-no-longer-slow-down); the MLX path
+never builds the analyzer that leaks the hooks, so it stays flat.
+
+8-bit is the one to use. It is near-lossless — KL 8e-5 against float32 on the
+first step's speech logits — and exactly as fast as 4-bit, because at this size
+the decode loop is bound by per-step overhead rather than memory bandwidth.
+4-bit only buys space, at KL 3e-2, so there is little reason to reach for it.
+MLX's unquantised 16-bit matmuls came out *slower* than float32 here (34 tok/s),
+which is why bfloat16 is not offered.
+
+What this means for a whole block is smaller than the token rate suggests. With
+T3 at 8-bit, about 1.3 s of a 3.5 s generation is T3 and the rest is s3gen on
+`mps`, so the stage that was dominant stops being the bottleneck. Porting s3gen
+would be the next win, not more T3 tuning.
+
+`mlx_t3.py` reimplements T3: the Llama backbone, the learned position tables,
+the conditioning encoder and the output head. Parameter names match the torch
+checkpoint, so the same `safetensors` file loads with no conversion step, and
+language checkpoints work as they do on PyTorch.
+
+Because this replaces `model.t3` outright, chatterbox's alignment analyzer is
+never built — and two things depend on it. The MLX port keeps its own analyzer
+with the same state and exposes it where the block check looks, so
+*transcription check* and the runaway/truncated-block detection keep working;
+and the premature-end fix is applied inside `mlx_t3.py`, since
+`oprav_predcasny_konec()` cannot reach that path.
+
+Precision is recorded in an unfinished book's corrections fingerprint, so a
+change is logged but still lets the book continue. On Windows and Linux nothing
+changes: the `mlx` wheels exist only for macOS on arm64, and `requirements.txt`
+marks them so `pip` skips those lines entirely.
+
+#### If you bump chatterbox
+
+The MLX path cannot be exercised without an Apple Silicon machine, but the
+assumptions it makes about chatterbox can be — and they are, by
+[`tests/test_chatterbox_api.py`](tests/test_chatterbox_api.py). Those tests need
+neither `mlx` nor a Mac, so they run in the same `unittest discover` as
+everything else. If one of them fails after a version bump, it names what to
+look at:
+
+| Failing test | What moved | What to re-check |
+|---|---|---|
+| `test_sledovane_hlavy_se_nezmenily` | `LLAMA_ALIGNED_HEADS` | `ALIGNED_HEADS` in `mlx_t3.py` — different heads mean a different alignment map, so block checking on MLX would quietly stop being meaningful |
+| `test_analyzator_drzi_cteny_stav` | the analyzer's state fields | `_ZarovnaniMlx` in `audiobookery.py` and `AlignmentAnalyzer` in `mlx_t3.py` |
+| `test_step_bere_next_token` | `AlignmentStreamAnalyzer.step` signature | `oprav_predcasny_konec()` — the premature-end fix would stop applying on the **torch** path too |
+| `test_t3_stavi_analyzator_pod_patched_model` | where T3 keeps the analyzer | `stav_zarovnani()` and `_MlxT3.patched_model` |
+| `test_t3config_ma_pole_ktera_mlx_cte` | `T3Config` fields | the model construction in `mlx_t3.py` |
+| `test_konfigurace_backbonu_ma_klice_ktere_mlx_cte` | the Llama config keys | `Attention` / `MLP` / `LlamaBackbone` in `mlx_t3.py` |
+
+Nothing outside `mlx_t3.py`, `_MlxT3` and `_ZarovnaniMlx` is MLX-specific, so
+if the MLX path ever becomes more trouble than it is worth, deleting those three
+and the `mlx_presnost` setting takes the feature out without touching anything
+else.
 
 ### Long books no longer slow down
 
@@ -608,6 +682,7 @@ attribution and per-model links are in [NOTICE.md](NOTICE.md).
 ```
 audiobookery/
   audiobookery.py      # the whole application
+  mlx_t3.py            # T3 in MLX, for Apple Silicon (unused elsewhere)
   preklady.py          # interface strings (en / cs)
   modely.json          # language catalogue
   vyslovnost.json      # your pronunciation rewrites
