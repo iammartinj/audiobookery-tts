@@ -358,6 +358,8 @@ TEXTY = {
                          "Blok {0}/{1}: čte se moc pomalu ({2:.1f} znaku za sekundu), nejspíš protažený brbláním."),
     "log_ticho":        ("Block {0}/{1}: {2:.1f} s without speech inside the block (murmur).",
                          "Blok {0}/{1}: {2:.1f} s bez řeči uvnitř bloku (brblání)."),
+    "log_opakovani":    ("Block {0}/{1}: the ending is said twice (contrast {2:.2f}, {3:.1f} s back).",
+                         "Blok {0}/{1}: koncovka zazněla dvakrát (vyčnívá o {2:.2f}, {3:.1f} s předtím)."),
     "log_asr_stahuji":  ("Downloading the transcription check model ({0:.1f} GB, one time only)...",
                          "Stahuji model pro kontrolu přepisem ({0:.1f} GB, jen jednou)..."),
     "log_asr_nacten":   ("Transcription check ready ({0}).", "Kontrola přepisem připravena ({0})."),
