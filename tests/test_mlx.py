@@ -102,6 +102,48 @@ class OtiskPresnosti(unittest.TestCase):
         self.assertEqual(zmeny, [])
 
 
+class SeedProMlx(unittest.TestCase):
+    """Seed musí dojít i do MLX, jinak se kniha nezopakuje.
+
+    T3 v MLX vzorkuje mx.random.categorical, na kterou torchový seed
+    nedosáhne. Naměřeno před opravou: stejný blok se stejným seedem vyšel
+    na 107 520 a pak na 109 440 vzorků.
+    """
+
+    def falesne_mlx(self):
+        jadro = types.SimpleNamespace(random=types.SimpleNamespace(seed=mock.Mock()))
+        return jadro, {"mlx": types.SimpleNamespace(core=jadro), "mlx.core": jadro}
+
+    def test_na_apple_siliconu_se_mlx_seeduje(self):
+        jadro, moduly = self.falesne_mlx()
+        with mock.patch.object(ab, "mlx_mozny", return_value=True), \
+             mock.patch.dict(sys.modules, moduly):
+            ab.nastav_seed(2112)
+        jadro.random.seed.assert_called_once_with(2112)
+
+    def test_jinde_se_mlx_neshani(self):
+        # Na Windows a Linuxu mlx neexistuje - import se nesmí ani zkusit.
+        jadro, moduly = self.falesne_mlx()
+        with mock.patch.object(ab, "mlx_mozny", return_value=False), \
+             mock.patch.dict(sys.modules, moduly):
+            ab.nastav_seed(2112)
+        jadro.random.seed.assert_not_called()
+
+    def test_bez_nainstalovaneho_mlx_jen_projde(self):
+        # Apple Silicon bez mlx: seed ostatních generátorů se nesmí zahodit.
+        with mock.patch.object(ab, "mlx_mozny", return_value=True), \
+             mock.patch.dict(sys.modules, {"mlx": None, "mlx.core": None}):
+            ab.nastav_seed(2112)          # nic nevyhodí
+
+    def test_nulovy_seed_nesahne_na_nic(self):
+        # 0 = "neurčeno", vypnutý seed se nesmí projevit ani v MLX.
+        jadro, moduly = self.falesne_mlx()
+        with mock.patch.object(ab, "mlx_mozny", return_value=True), \
+             mock.patch.dict(sys.modules, moduly):
+            ab.nastav_seed(0)
+        jadro.random.seed.assert_not_called()
+
+
 class UvolneniPameti(unittest.TestCase):
     """Uvolnění cache nesmí spadnout, ať je pod tím cokoli."""
 
