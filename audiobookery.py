@@ -2374,6 +2374,19 @@ class TtsEngine:
 
 
 def nastav_seed(seed: int):
+    """Nastaví všechny generátory, ze kterých se vzorkuje řeč.
+
+    MLX má vlastní generátor, na který torchový seed nedosáhne: T3 v MLX
+    vybírá tokeny přes mx.random.categorical, takže bez mx.random.seed() se
+    kniha se stejným seedem nezopakuje - vzorkování jde dál tam, kde ho
+    nechal předchozí blok. Slyšitelně jde o jiné čtení, ne o jinou nuanci:
+    stejný blok se stejným seedem vyšel jednou na 107 520 vzorků a podruhé
+    na 109 440.
+
+    Zadaný seed je jediná věc, která z převodu dělá zopakovatelný pokus:
+    bez něj nejde srovnat dvě nastavení ani přegenerovat jeden blok tak, jak
+    vyšel. Na MLX cestě přitom do vzorkování řeči nezasahoval vůbec.
+    """
     if not seed:
         return
     import random
@@ -2385,6 +2398,13 @@ def nastav_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    if mlx_mozny():
+        try:
+            import mlx.core as mx
+
+            mx.random.seed(seed)
+        except ImportError:
+            pass          # macOS na arm64, ale mlx nenainstalované
 
 
 def odstran_lupance(vzorky, sr: int, zapnuto: bool = True):
