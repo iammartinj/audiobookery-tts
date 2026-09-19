@@ -2618,6 +2618,38 @@ MIN_RECI_S = 0.15
 # brbláním. Běžně 13,4 znaku za sekundu, 10 % nejpomalejších zdravých pod
 # 11,5; vadné bloky 6,6 až 9,4.
 MIN_ZNAKU_ZA_S = 9.5
+# Opakovaná koncovka: model dočte text a pak řekne posledních pár slov ještě
+# jednou. Typicky na krátkém bloku - "Hele," řekl. "Hned jsem zpátky." vyjde
+# na 2,5 s, a když se koncovka zopakuje, na 4 až 8 s.
+#
+# Kalibrováno na 407 blocích (7 řádků x 21 hlasů plus 260 opakovaných
+# generování jednoho krátkého řádku se dvěma hlasy). Značku dělal přepis
+# whisperem: koncovka opakovaná, když poslední 2 až 5 slov textu zazní v
+# přepisu dvakrát. Tak označených bylo 46 bloků.
+#
+#   rychlost < 11 zn/s sama            96 % zachyceno, ale 42 % planých
+#   vyčnívání >= 0,35 samo             96 % zachyceno,  10  % planých
+#   rychlost < 11 A vyčnívání >= 0,35  96 % zachyceno,  8,3 % planých
+#
+# Sama rychlost nestačí, protože i čistě přečtený krátký blok se čte 7,8 až
+# 12,5 zn/s. Samotná shoda koncovky s dřívějším úsekem taky ne: stejné
+# pravidlo s ní místo vyčnívání zachytilo jen 87 % a hučení na jednom tónu v
+# ní dá 1,00, protože se potká s čímkoli. Proto se od nejlepší shody odečítá
+# medián všech - opakovaná koncovka se potká s jedním místem, ne s blokem
+# obecně (u označených vyčnívá 0,45 až 0,70, u čistých 0,16 až 0,44).
+#
+# Z planých poplachů byla navíc třetina delší než 1,45násobek mediánu délky
+# svého řádku, tedy skoro jistě chyba značky - whisper má silný jazykový
+# model a zopakovanou frázi umí přepsat jen jednou (7,08 s na 33 znaků
+# přepsaných jako čistá věta). Cena planého poplachu je jedno generování
+# navíc, ne vada v knize: blok se jen zkusí znovu s jiným seedem.
+OPAKOVANI_DOTAZ_S = 0.6
+OPAKOVANI_ODSTUP_S = 0.35
+OPAKOVANI_OKNO = 1024       # rámec FFT
+OPAKOVANI_HOP = 256         # posun rámce, tedy rozlišení odstupu (10,7 ms)
+PRAH_OPAKOVANI = 0.35
+OPAKOVANI_ZNAKU_ZA_S = 11.0
+RE_SLOVO = re.compile(r"\w+")
 
 
 def rozbor_reci(vzorky, sr: int):
@@ -2651,6 +2683,102 @@ def rozbor_reci(vzorky, sr: int):
     delky = np.flatnonzero(zmeny == -1) - np.flatnonzero(zmeny == 1)
     nejdelsi = float(delky.max()) * krok / sr if len(delky) else 0.0
     return int(zacatky[rec[-1]] + okno), nejdelsi
+
+
+def _pasy_spektra(vzorky, sr: int, pasu: int = 24):
+    """Blok -> (pásů, rámců) jednotkových vektorů k porovnávání úseků.
+
+    Hledá se "totéž znovu", takže musí rozhodovat barva hlásek, ne hlasitost:
+    energie se sečte do 24 logaritmicky rozložených pásů (hrubá melová banka,
+    jen bez další závislosti), zlogaritmuje, z každého rámce se odečte jeho
+    průměr a rámec se znormuje. Skalární součin dvou rámců je pak přímo
+    kosinová podobnost.
+    """
+    import numpy as np
+
+    y = np.asarray(vzorky, dtype="float32").reshape(-1)
+    if len(y) < OPAKOVANI_OKNO * 2:
+        return np.zeros((pasu, 0), dtype="float32")
+    ramce = np.lib.stride_tricks.sliding_window_view(y, OPAKOVANI_OKNO)[::OPAKOVANI_HOP]
+    okenko = np.hanning(OPAKOVANI_OKNO).astype("float32")
+    spektrum = np.abs(np.fft.rfft(ramce * okenko, axis=1))
+
+    hranice = np.geomspace(80.0, min(8000.0, sr / 2.0), pasu + 1)
+    kosi = np.searchsorted(np.fft.rfftfreq(OPAKOVANI_OKNO, 1.0 / sr), hranice)
+    f = np.stack([spektrum[:, a:max(b, a + 1)].sum(axis=1) for a, b in zip(kosi, kosi[1:])])
+    f = np.log1p(f)
+    f -= f.mean(axis=0, keepdims=True)
+    return f / (np.linalg.norm(f, axis=0, keepdims=True) + 1e-9)
+
+
+def opakovani_konce(vzorky, sr: int):
+    """(o kolik konec řeči vyčnívá nad blok, odstup v s k nejlepší shodě).
+
+    Opakovaná koncovka je totéž znovu, takže se v bloku pozná jako úsek,
+    který už v něm byl. Dotazem je posledních OPAKOVANI_DOTAZ_S *řeči* -
+    koncové ticho se zahodí, jinak by ticho našlo ticho a skórovalo přes 0,9
+    v každém bloku. Dřívější úsek musí začínat aspoň OPAKOVANI_ODSTUP_S před
+    dotazem, aby se dotaz nenašel sám v sobě.
+
+    Vrací se rozdíl nejlepší shody proti mediánu všech, ne shoda sama.
+    Opakovaná koncovka se potká s jedním místem, ne s blokem obecně - kdežto
+    hučení na jednom tónu se potká se vším a v samotné shodě dá 1,00.
+    """
+    import numpy as np
+
+    konec_reci, _ = rozbor_reci(vzorky, sr)
+    y = np.asarray(vzorky, dtype="float32").reshape(-1)[:max(konec_reci, 1)]
+    f = _pasy_spektra(y, sr)
+    dotaz_ramcu = max(1, int(OPAKOVANI_DOTAZ_S * sr / OPAKOVANI_HOP))
+    odstup_ramcu = int(OPAKOVANI_ODSTUP_S * sr / OPAKOVANI_HOP)
+    kolik = f.shape[1] - dotaz_ramcu - odstup_ramcu     # kam všude se dotaz vejde
+    if kolik < 1:
+        return 0.0, 0.0
+
+    # skore[s] = průměrná podobnost dotazu s úsekem začínajícím rámcem s.
+    # Přes součin dotaz.T @ f a sčítání posunutých řádků, aby to byla lineární
+    # algebra a ne pythonovská smyčka přes rámce.
+    soucin = f[:, -dotaz_ramcu:].T @ f
+    skore = np.zeros(kolik, dtype="float32")
+    for k in range(dotaz_ramcu):
+        skore += soucin[k, k:k + kolik]
+    skore /= dotaz_ramcu
+
+    kde = int(skore.argmax())
+    vycnivani = float(skore[kde] - np.median(skore))
+    return vycnivani, (f.shape[1] - dotaz_ramcu - kde) * OPAKOVANI_HOP / float(sr)
+
+
+def konec_opakovany_v_textu(text: str) -> int:
+    """Kolik posledních slov textu se v něm hned předtím opakuje (0 = žádné).
+
+    "Pak jsem zvracel a zvracel a zvracel." nebo "Já to říkal! Já to říkal!"
+    má opakovanou koncovku už v textu, takže do zvuku patří a hlídat se nesmí.
+    Na knihách v knihy/ je takových bloků 19 z 30 tisíc, tedy 0,00 až 0,13 %
+    podle knihy - na tak vzácný případ stačí tahle podmínka a nemusí se kvůli
+    němu pouštět přepis.
+    """
+    slova = RE_SLOVO.findall(text.lower())
+    for k in range(5, 1, -1):
+        if len(slova) >= 2 * k and slova[-k:] == slova[-2 * k:-k]:
+            return k
+    return 0
+
+
+def posud_opakovani(vzorky, sr: int, text: str):
+    """(zazněla koncovka dvakrát?, vyčnívání, odstup v s).
+
+    Dvě podmínky zároveň, každá sama o sobě dělá moc planých poplachů:
+    blok trvá dýl, než na jeho text padne, a jeho konec už v něm jednou byl.
+    Čísla a měření jsou u PRAH_OPAKOVANI.
+    """
+    if konec_opakovany_v_textu(text):
+        return False, 0.0, 0.0
+    rychlost = len(text) / max(len(vzorky) / float(sr), 1e-3)
+    if rychlost >= OPAKOVANI_ZNAKU_ZA_S:
+        return False, 0.0, 0.0
+    opak, odstup = opakovani_konce(vzorky, sr)
+    return opak >= PRAH_OPAKOVANI, opak, odstup
 
 
 def stav_zarovnani(engine):
@@ -2827,6 +2955,14 @@ def _generuj_jednou(engine, text: str, p: dict, index: int, celkem: int, log):
                 elif len(text) >= 100 and rychlost < MIN_ZNAKU_ZA_S:
                     vada = "pomaly"
                     log(T("log_pomaly", index, celkem, rychlost))
+                else:
+                    # Krátké bloky sem propadnou i protažené: kontrola rychlosti
+                    # výš platí až od 100 znaků, a právě na krátkém bloku model
+                    # nejčastěji zopakuje koncovku.
+                    dvakrat, opak, odstup = posud_opakovani(vzorky, engine.sr, text)
+                    if dvakrat:
+                        vada = "opakovani"
+                        log(T("log_opakovani", index, celkem, opak, odstup))
 
             if not vada:
                 return vzorky, ""
@@ -2849,11 +2985,14 @@ def _generuj_jednou(engine, text: str, p: dict, index: int, celkem: int, log):
         log(T("log_asr_vyber", index, celkem, nejlepsi + 1, len(kandidati), body[nejlepsi]))
         return kandidati[nejlepsi]
     # Bez přepisu: čistý pokus, jinak uříznutý ocas, jinak poslední
-    poradi = {"": 0, "ocas": 1, "ticho": 2, "pomaly": 2, "dlouhy": 2, "nedocteno": 3}
+    poradi = {"": 0, "ocas": 1, "ticho": 2, "pomaly": 2, "dlouhy": 2,
+              "opakovani": 2, "nedocteno": 3}
     return min(reversed(kandidati), key=lambda k: poradi[k[1]])
 
 
-# Vady, které po uříznutí nezmizí - s takovým pokusem se blok raději rozdělí
+# Vady, které po uříznutí nezmizí - s takovým pokusem se blok raději rozdělí.
+# "opakovani" tady schválně není: opakovaná koncovka roste právě na krátkém
+# bloku, takže dělit by znamenalo přilévat. Zbývá na ni opakované generování.
 VADY_K_DELENI = ("ticho", "pomaly", "dlouhy", "nedocteno")
 
 
