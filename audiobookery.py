@@ -274,6 +274,18 @@ MLX_ZAKLADNI_T3 = "t3_mtl23ls_v2.safetensors"
 # délku, takže bez stropu cache roste s nejdelším blokem a už se nevrátí.
 MLX_STROP_CACHE_MB = 512
 
+# Dekodér na MPS (s3gen) si drží paměť podle tvaru vstupu a empty_cache() ji
+# nevrací. Každý blok má jiný počet řečových tokenů, takže každý je nový tvar:
+# naměřeno +84 MB na blok, 48 bloků z 10 kB textu zvedlo MPS driver z 3,9 na
+# 7,6 GB, u knihy by to byly desítky GB. Doplněním na násobek se počet tvarů
+# omezí na jednotky a paměť se po zahřátí zastaví (+3 MB na blok). 128 je
+# kompromis: blok do 300 znaků dá do ~550 tokenů, tedy nejvýš pět bucketů,
+# a doplnění stojí nejvýš 127 tokenů řeči na konci, které se zase uříznou.
+MPS_BUCKET_TOKENU = 128
+# Ticho v s3genu. Do slovníku s3tokenizeru patří, ale nikdy se nepřečte:
+# doplňuje se až za konec textu a vzorky pro něj se zahodí.
+S3GEN_SIL = 4299
+
 
 def mlx_mozny() -> bool:
     """Může tady MLX vůbec běžet? Jen platforma, nic se neimportuje."""
@@ -1810,6 +1822,78 @@ def uvolni_pamet_zarizeni(zarizeni: str = None):
         pass
 
 
+def obal_dekoder_na_tvary(puvodni, bucket: int = MPS_BUCKET_TOKENU):
+    """Obalí `inference()` dekodéru: doplní tokeny na násobek a zvuk uřízne.
+
+    Vrací funkci se stejným rozhraním. Když vstup na násobek už sedí (nebo
+    `speech_tokens` vůbec nepřijde), volá se původní funkce beze změny.
+    """
+    import torch
+
+    @functools.wraps(puvodni)
+    def inference(*args, **kwargs):
+        tokeny = kwargs.get("speech_tokens")
+        if tokeny is None or not hasattr(tokeny, "shape") or tokeny.ndim == 0 or bucket <= 0:
+            return puvodni(*args, **kwargs)
+        n = int(tokeny.shape[-1])
+        na = -(-n // bucket) * bucket
+        if na <= n:
+            return puvodni(*args, **kwargs)
+
+        vypln = torch.full(tokeny.shape[:-1] + (na - n,), S3GEN_SIL,
+                           dtype=tokeny.dtype, device=tokeny.device)
+        argumenty = dict(kwargs, speech_tokens=torch.cat([tokeny, vypln], dim=-1))
+        # Délky se dnes neposílají, ale kdyby je knihovna začala používat,
+        # musí sedět na doplněný vstup - jinak by se konec ignoroval nebo
+        # naopak četl prázdno. Když tvar nesedí, radši nic nedoplňovat.
+        delky = kwargs.get("speech_token_lens")
+        if delky is not None:
+            try:
+                argumenty["speech_token_lens"] = delky + (na - n)
+            except Exception:
+                return puvodni(*args, **kwargs)
+
+        zvuk, zdroje = puvodni(*args, **argumenty)
+        # Jeden token jsou dva mel framy po 480 vzorcích, takže poměr délek
+        # sedí na vzorek. Počítá se z výsledku, ne z konstanty: kdyby se hop
+        # v knihovně změnil, ať se to nemusí dohledávat tady.
+        return zvuk[..., :int(round(zvuk.shape[-1] * n / na))], zdroje
+
+    return inference
+
+
+def zpevni_tvary_dekoderu(model) -> bool:
+    """Zarovná délku vstupu dekodéru na násobky - viz MPS_BUCKET_TOKENU.
+
+    Proč: MPS alokátor drží bloky podle tvaru a `torch.mps.empty_cache()` je
+    po skutečném generování nevrací (ověřeno: stejný blok patnáctkrát za sebou
+    paměť nezmění, ale každá nová délka přidá 60-140 MB a už je nedá zpět).
+    Protože každý blok knihy má jiný počet tokenů, paměť roste s počtem bloků.
+
+    Co to udělá se zvukem: dekodér si šum losuje podle délky vstupu, takže
+    z téhož textu vyjde jiná realizace než bez doplnění - stejná změna, jako
+    když se změní seed. Není to zhoršení, ale nedokončená kniha se doplní
+    jiným čtením, než jaké má nahrané bloky.
+
+    Vrací True, když se obal nasadil (ať se to dá zalogovat a otestovat).
+    """
+    try:
+        import torch
+    except Exception:
+        return False
+    if not (getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()):
+        return False
+
+    dekoder = getattr(model, "s3gen", None)
+    if dekoder is None or getattr(dekoder, "audiobookery_puvodni_inference", None) is not None:
+        return False
+
+    puvodni = dekoder.inference
+    dekoder.audiobookery_puvodni_inference = puvodni
+    dekoder.inference = obal_dekoder_na_tvary(puvodni)
+    return True
+
+
 def uvolni_hooky_t3(model) -> int:
     """Zahodí forward hooky, které po sobě chatterbox na T3 nechává.
 
@@ -2064,6 +2148,11 @@ class TtsEngine:
 
         if rychly_dekoder:
             self._zapni_rychly_dekoder()
+
+        # Až po výměně dekodéru: obal se nasazuje na ten, který bude doopravdy
+        # generovat. Na CUDA a CPU není co řešit - tam empty_cache() funguje.
+        if zpevni_tvary_dekoderu(self.model):
+            self.log(T("log_tvary_dekoderu", MPS_BUCKET_TOKENU))
 
     # ------------------------------------------------------------------
     def _zakladni_t3(self):

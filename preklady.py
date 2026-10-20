@@ -314,6 +314,8 @@ TEXTY = {
                          "Stahuji rychlý dekodér ({0:.1f} GB, jen jednou)..."),
     "log_rd_aktivni":   ("Fast decoder active - 2 steps instead of 10.",
                          "Rychlý dekodér aktivní - 2 kroky místo 10."),
+    "log_tvary_dekoderu": ("Decoder input rounded up to {0} speech tokens to keep MPS memory flat.",
+                           "Vstup dekodéru zarovnán na násobek {0} řečových tokenů, aby paměť nerostla."),
     "err_rd":           ("The fast decoder could not be loaded ({0}). "
                          "Turn it off in advanced settings or try again.",
                          "Rychlý dekodér se nepodařilo načíst ({0}). "
