@@ -57,7 +57,7 @@ APP_NAME = "Audiobookery"
 
 # Znaky, které Windows v názvu souboru nedovolí
 ZAKAZANE_ZNAKY = r'[<>:"/\|?*]'
-VERSION = "1.14.0"
+VERSION = "1.15.0"
 
 VYSLOVNOST_PATH = APP_DIR / "vyslovnost.json"
 
